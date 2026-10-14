@@ -1,0 +1,97 @@
+name: release
+
+# Tagging v1.2.3 publishes a macOS universal binary for that tag.
+#
+#   git tag v1.2.3 && git push origin v1.2.3
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (a dry run; publishes nothing)'
+        required: true
+        default: 'dev'
+
+# Read-only by default: tests run dependency code, so the job that runs them
+# holds no token that can write a release or sign an attestation.
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    # Pinned rather than macos-latest: this job produces a signed artifact
+    # people download, so the image should change when we say so.
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          # A restored module/build cache would feed the release binary bytes
+          # this run did not produce.
+          cache: false
+
+      # The vault tests drive BLINDFOLD_KEK_FILE rather than the real keychain,
+      # so they run unattended here. Releasing an artifact whose tests never ran
+      # would defeat the point of having adversarial ones.
+      - name: Test
+        run: go test ./...
+
+      # Through env, not ${{ }} in the script: a dispatch input is text the
+      # shell would otherwise parse as code.
+      - name: Build
+        env:
+          VERSION: ${{ github.event.inputs.version || github.ref_name }}
+        run: scripts/build-macos.sh "$VERSION"
+
+      - name: Verify the artifact runs and is a real universal binary
+        run: |
+          lipo -archs dist/blindfold | tee /dev/stderr | grep -q x86_64
+          lipo -archs dist/blindfold | grep -q arm64
+          codesign --verify --verbose=1 dist/blindfold
+          dist/blindfold version
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: blindfold-darwin-universal
+          path: dist/
+
+  # Separate job so the write and signing permissions never coexist with test
+  # or build code. The attestation is what lets a downloader check the tarball
+  # came from this workflow; checksums.txt ships alongside it, so alone it only
+  # catches corruption.
+  publish:
+    needs: macos
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write      # create the release
+      id-token: write      # Sigstore certificate for the attestation
+      attestations: write  # store the attestation
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: blindfold-darwin-universal
+          path: dist/
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/blindfold_darwin_universal.tar.gz
+            dist/checksums.txt
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes \
+            dist/*.tar.gz dist/checksums.txt

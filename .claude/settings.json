@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "ask": [
+      "Bash(blindfold env:*)",
+      "Bash(blindfold get:*)",
+      "Bash(blindfold export:*)",
+      "Bash(blindfold add:*)",
+      "Bash(blindfold edit:*)",
+      "Bash(blindfold rm:*)",
+      "Bash(blindfold remove:*)",
+      "Bash(blindfold import:*)",
+      "Bash(blindfold init:*)"
+    ]
+  }
+}

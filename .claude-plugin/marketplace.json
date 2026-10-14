@@ -1,0 +1,30 @@
+{
+  "name": "blindfold",
+  "owner": {
+    "name": "magroski",
+    "url": "https://github.com/magroski"
+  },
+  "description": "A credential store for LLM coding agents.",
+  "plugins": [
+    {
+      "name": "blindfold",
+      "displayName": "Blindfold",
+      "source": "./",
+      "description": "Give coding agents your databases, APIs, and env vars without the values landing in the transcript. The agent loads a credential into the environment of the command it runs, and never sees the value.",
+      "version": "1.0.0",
+      "author": {
+        "name": "magroski"
+      },
+      "homepage": "https://github.com/magroski/blindfold",
+      "repository": "https://github.com/magroski/blindfold",
+      "license": "MIT",
+      "category": "security",
+      "keywords": [
+        "credentials",
+        "secrets",
+        "database",
+        "security"
+      ]
+    }
+  ]
+}

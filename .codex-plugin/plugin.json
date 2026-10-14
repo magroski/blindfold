@@ -1,0 +1,37 @@
+{
+  "name": "blindfold",
+  "version": "1.0.0",
+  "description": "Give coding agents your databases, APIs, and env vars without the values landing in the transcript. The agent loads a credential into the environment of the command it runs, and never sees the value.",
+  "author": {
+    "name": "magroski",
+    "url": "https://github.com/magroski"
+  },
+  "homepage": "https://github.com/magroski/blindfold",
+  "repository": "https://github.com/magroski/blindfold",
+  "license": "MIT",
+  "keywords": [
+    "credentials",
+    "secrets",
+    "database",
+    "elasticsearch",
+    "security",
+    "vault"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Blindfold",
+    "shortDescription": "Use your credentials without exposing them",
+    "longDescription": "Stores credentials as named bundles of environment variables. Codex can see what exists and load one into the environment of the command it is about to run with blindfold exec <name> -- <command>, so it gets the result without the value entering the conversation or the session transcript.",
+    "developerName": "magroski",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read"
+    ],
+    "websiteURL": "https://github.com/magroski/blindfold",
+    "defaultPrompt": [
+      "What credentials do I have access to?",
+      "Show me the schema of the candidates table.",
+      "Check how many documents are in the logs index."
+    ]
+  }
+}
