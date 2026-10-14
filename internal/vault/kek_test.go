@@ -121,3 +121,115 @@ func TestPassphraseFileRefusals(t *testing.T) {
 		})
 	}
 }
+
+// A mistyped passphrase derives a key that opens nothing. Sealing a new entry
+// under it would split the vault between two keys, so every write is refused
+// until the right one is supplied — empty vault included.
+func TestWrongPassphraseCannotWrite(t *testing.T) {
+	cases := []struct {
+		name     string
+		existing bool
+	}{
+		{name: "vault with an entry", existing: true},
+		{name: "empty vault", existing: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("BLINDFOLD_KEK_FILE", "")
+			t.Setenv("BLINDFOLD_PASSPHRASE_FILE", "")
+			t.Setenv("BLINDFOLD_PASSPHRASE", "right passphrase")
+			v, err := Open(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := v.Init(); err != nil {
+				t.Fatalf("Init: %v", err)
+			}
+			if tc.existing {
+				if err := v.Put(sampleEntry(), map[string]string{"ES_API_KEY": "s3cr3t"}); err != nil {
+					t.Fatalf("Put: %v", err)
+				}
+			}
+			sealedPath := filepath.Join(dir, SealedFile)
+			before, _ := os.ReadFile(sealedPath)
+
+			t.Setenv("BLINDFOLD_PASSPHRASE", "wrong passphrase")
+			reopened, err := Open(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			entry := Entry{Name: "pg-ro", Vars: []Var{{Name: "DATABASE_URL", Secret: true}}}
+			err = reopened.Put(entry, map[string]string{"DATABASE_URL": "postgres://x"})
+			if !errors.Is(err, ErrWrongKey) {
+				t.Errorf("Put under the wrong passphrase = %v, want ErrWrongKey", err)
+			}
+			if after, _ := os.ReadFile(sealedPath); string(after) != string(before) {
+				t.Error("the sealed file changed despite the refusal")
+			}
+		})
+	}
+}
+
+// A vault whose key is gone cannot be adopted by a new one: init would seal new
+// entries beside ciphertext no key opens any more.
+func TestInitRefusesAnOrphanedVault(t *testing.T) {
+	v := newTestVault(t)
+	if err := v.Put(sampleEntry(), map[string]string{"ES_API_KEY": "s3cr3t"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(os.Getenv("BLINDFOLD_KEK_FILE")); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(v.Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.Init(); err == nil || !strings.Contains(err.Error(), SealedFile) {
+		t.Errorf("Init over an orphaned vault = %v, want a refusal naming %s", err, SealedFile)
+	}
+}
+
+// A version-2 vault of public entries has no data key to check a passphrase
+// against. Reading it under a typo must not make the typo its key.
+func TestWrongPassphraseCannotClaimAnUnverifiableUpgrade(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BLINDFOLD_KEK_FILE", "")
+	t.Setenv("BLINDFOLD_PASSPHRASE_FILE", "")
+	t.Setenv("BLINDFOLD_PASSPHRASE", "right passphrase")
+	v, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Init(); err != nil {
+		t.Fatal(err)
+	}
+	// As version 2 left it: metadata only, an empty sealed file with no check.
+	v.meta.Upsert(Entry{Name: "flags", Vars: []Var{{Name: "FEATURE_X", Value: "on"}}})
+	if err := v.saveMetadata(); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.saveSealed(&sealedFile{Version: sealedVersionVars, Entries: map[string]sealedEntry{}}); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("BLINDFOLD_PASSPHRASE", "wrong passphrase")
+	typo, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := typo.Unseal("flags"); err != nil {
+		t.Fatalf("read under the typo: %v", err)
+	}
+
+	t.Setenv("BLINDFOLD_PASSPHRASE", "right passphrase")
+	right, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := right.Unseal("flags"); err != nil {
+		t.Errorf("the right passphrase no longer opens the vault: %v", err)
+	}
+}

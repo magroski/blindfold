@@ -1,0 +1,46 @@
+name: ci
+
+# Every push and pull request is tested on both supported platforms, with every
+# shell the quoting rules are written for, and scanned for known
+# vulnerabilities in the code paths the binary actually calls.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-26]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      # The shell-quoting tests fail rather than skip under CI, so every shell
+      # must be present. Linux also gets a keyring for the Secret Service tests.
+      - name: Install shells and keyring (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zsh fish gnome-keyring dbus
+      - name: Install shells (macOS)
+        if: runner.os == 'macOS'
+        run: brew install fish
+
+      - name: Test
+        run: scripts/test.sh
+
+      - name: Vulnerability scan
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...

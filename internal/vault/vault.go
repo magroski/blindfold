@@ -40,6 +40,10 @@ type Vault struct {
 	keys KeySource
 
 	kek []byte // cached after first unseal, for the life of this process
+
+	// exists is true once dir holds a vault that init created. A key alone does
+	// not make one: it may have been made for another directory, or planted.
+	exists bool
 }
 
 // Open loads vault metadata from dir, creating neither files nor keys. A missing
@@ -61,6 +65,7 @@ func Open(dir string) (*Vault, error) {
 	if err := json.Unmarshal(data, v.meta); err != nil {
 		return nil, fmt.Errorf("vault: %s is corrupt: %w", MetadataFile, err)
 	}
+	v.exists = true
 	if v.meta.Version != metadataVersion {
 		return nil, fmt.Errorf("vault: %s has version %d, this build supports %d. "+
 			"Version 1 vaults were written by the kind-based (database/http/env) layout; "+
@@ -76,8 +81,11 @@ func (v *Vault) Dir() string { return v.dir }
 // KeySourceDescription reports where the master key comes from, for `blindfold doctor`.
 func (v *Vault) KeySourceDescription() string { return v.keys.Describe() }
 
-// Initialized reports whether a master key exists yet.
+// Initialized reports whether init has run here and the master key loads.
 func (v *Vault) Initialized() bool {
+	if !v.exists {
+		return false
+	}
 	_, err := v.keys.Load()
 	return err == nil
 }
@@ -90,10 +98,31 @@ func (v *Vault) Init() error {
 		return fmt.Errorf("vault: refusing to create a vault inside the git repository at %s; "+
 			"vaults belong outside version control", repo)
 	}
-	if _, err := v.keys.Load(); err == nil {
+	_, err := v.keys.Load()
+	if err == nil && v.exists {
 		return errors.New("vault: a master key already exists; `blindfold init` would orphan the current vault")
-	} else if !errors.Is(err, ErrNoKey) {
+	}
+	// The key is adopted by no vault but the one it was made with: a planted
+	// one would see every secret sealed from here on.
+	if err == nil {
+		return fmt.Errorf("vault: a master key already exists (%s), but %s holds no vault; "+
+			"blindfold will not adopt a key it did not create here. If it is left over from a vault "+
+			"you removed, delete it first, or point BLINDFOLD_DIR at the vault it belongs to",
+			v.keys.Describe(), v.dir)
+	}
+	if !errors.Is(err, ErrNoKey) {
 		return err
+	}
+	// Values sealed under a key that is gone would sit beside new ones sealed
+	// under the next, and no single key would open the vault.
+	sealed, err := v.loadSealed()
+	if err != nil {
+		return err
+	}
+	if len(sealed.Entries) > 0 || sealed.Check != nil {
+		return fmt.Errorf("vault: %s was sealed under a master key that cannot be found; "+
+			"restore that key, or move %s and %s out of %s to start over",
+			SealedFile, SealedFile, MetadataFile, v.dir)
 	}
 
 	if err := os.MkdirAll(v.dir, 0o700); err != nil {
@@ -112,7 +141,17 @@ func (v *Vault) Init() error {
 	if v.kek, err = v.keys.Load(); err != nil {
 		return err
 	}
-	return v.saveMetadata()
+	if err := sealed.addCheck(v.kek); err != nil {
+		return err
+	}
+	if err := v.saveSealed(sealed); err != nil {
+		return err
+	}
+	if err := v.saveMetadata(); err != nil {
+		return err
+	}
+	v.exists = true
+	return nil
 }
 
 // masterKey fetches and caches the master key.
@@ -144,13 +183,19 @@ func (v *Vault) Get(name string) (*Entry, bool) { return v.meta.Find(name) }
 // Sealed values for variables the entry no longer declares are dropped, so
 // removing a variable really removes it rather than leaving ciphertext behind.
 func (v *Vault) Put(entry Entry, values map[string]string) error {
+	if !v.exists {
+		return errors.New("vault: not initialized — run `blindfold init` first")
+	}
 	if err := entry.Validate(); err != nil {
 		return err
 	}
-	for name := range values {
+	for name, value := range values {
 		if v, ok := entry.Var(name); !ok || !v.Secret {
 			return fmt.Errorf("vault: %q supplies a value for %s, which it does not declare as secret",
 				entry.Name, name)
+		}
+		if err := validateValue(name, value); err != nil {
+			return err
 		}
 	}
 
@@ -172,10 +217,9 @@ func (v *Vault) Put(entry Entry, values map[string]string) error {
 		// A sealed entry with no metadata is left over from an interrupted write.
 		sealed.remove(entry.Name)
 	}
-	if len(values) > 0 {
-		if err := sealed.setFields(kek, &entry, values); err != nil {
-			return err
-		}
+	// Every entry gets a data key, secrets or not: it is what vouches for it.
+	if err := sealed.setFields(kek, &entry, values); err != nil {
+		return err
 	}
 	sealed.retainFields(entry.Name, entry.SecretNames())
 
@@ -272,14 +316,23 @@ func (v *Vault) openSealed(kek []byte) (*sealedFile, error) {
 	if err != nil {
 		return nil, err
 	}
-	if sealed.Version == sealedVersion {
-		return sealed, nil
+	upgrade, verified := sealed.Version != sealedVersion, false
+	if upgrade {
+		if verified, err = sealed.migrate(kek, v.meta); err != nil {
+			return nil, err
+		}
 	}
-	if err := sealed.migrate(kek, v.meta); err != nil {
+	// A wrong key stops here, before anything is sealed under it.
+	if err := sealed.verifyKey(kek, v.meta); err != nil {
 		return nil, err
 	}
-	if err := v.saveSealed(sealed); err != nil {
-		return nil, err
+	// An upgrade is saved, check included, once an old data key vouched for the
+	// master key. With none to vouch, a read must not make a mistyped
+	// passphrase the vault's key; the next write saves the upgrade instead.
+	if upgrade && verified {
+		if err := v.saveSealed(sealed); err != nil {
+			return nil, err
+		}
 	}
 	return sealed, nil
 }

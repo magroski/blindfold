@@ -30,8 +30,9 @@ const (
 
 // plaintextRefusal decides whether `get` and `export` may print plaintext. It
 // returns the conditions that forbid it, or "" when it is allowed: at a
-// terminal outside any agent's shell, or with --force.
-func plaintextRefusal(isTerminal bool, getenv func(string) string, force bool) string {
+// terminal outside any agent's shell, or with --force. A marker counts when set
+// at all: `CLAUDECODE= blindfold get x` is still an agent's shell.
+func plaintextRefusal(isTerminal bool, lookupEnv func(string) (string, bool), force bool) string {
 	if force {
 		return ""
 	}
@@ -40,7 +41,7 @@ func plaintextRefusal(isTerminal bool, getenv func(string) string, force bool) s
 		reasons = append(reasons, notTerminal)
 	}
 	for _, marker := range agentShellMarkers {
-		if getenv(marker) != "" {
+		if _, set := lookupEnv(marker); set {
 			reasons = append(reasons, marker+" is set (an agent's shell)")
 		}
 	}
@@ -51,7 +52,7 @@ func plaintextRefusal(isTerminal bool, getenv func(string) string, force bool) s
 // captured, and records the refusal. It runs before the vault is opened, so a
 // refusal never unseals anything.
 func guardPlaintext(env Env, tool, name string, force bool) error {
-	reason := plaintextRefusal(stdoutIsTerminal(env), os.Getenv, force)
+	reason := plaintextRefusal(stdoutIsTerminal(env), os.LookupEnv, force)
 	if reason == "" {
 		return nil
 	}

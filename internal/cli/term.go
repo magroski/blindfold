@@ -12,6 +12,10 @@ import (
 
 func isTerminal(f *os.File) bool { return term.IsTerminal(int(f.Fd())) }
 
+// readPassword reads a line without echo. Tests swap it to simulate a terminal
+// that cannot hide input.
+var readPassword = term.ReadPassword
+
 // prompter asks a person questions at a terminal.
 //
 // Visible answers are read through a buffered reader and hidden ones straight
@@ -71,15 +75,11 @@ func (p *prompter) hidden(prompt string) (string, error) {
 		return strings.TrimRight(line, "\r\n"), err
 	}
 
-	data, err := term.ReadPassword(int(p.in.Fd()))
+	data, err := readPassword(int(p.in.Fd()))
 	if err != nil {
-		// Fall back to an echoed read rather than failing outright — a visible
-		// secret beats a command that cannot run at all.
-		line, rerr := p.buf.ReadString('\n')
-		if rerr != nil {
-			return "", err
-		}
-		return strings.TrimRight(line, "\r\n"), nil
+		// Never fall back to an echoed read: the secret would stay on screen
+		// and in the scrollback. Piped input needs no terminal at all.
+		return "", fmt.Errorf("this terminal cannot hide input (%v); pipe the value in on stdin instead", err)
 	}
 	return string(data), nil
 }

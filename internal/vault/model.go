@@ -69,6 +69,10 @@ func ValidateEntryName(name string) error {
 	if name == "" {
 		return fmt.Errorf("vault: an entry name is required")
 	}
+	// "-force" would read as a flag wherever the name is typed.
+	if strings.HasPrefix(name, "-") {
+		return fmt.Errorf("vault: %q is not a usable entry name; it may not start with -", name)
+	}
 	for _, r := range name {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
@@ -90,6 +94,16 @@ func validateText(what, s string) error {
 		if unicode.IsControl(r) {
 			return fmt.Errorf("vault: the %s contains a control character, which a listing cannot show", what)
 		}
+	}
+	return nil
+}
+
+// validateValue rejects a NUL, which no environment variable can carry: the
+// value would be cut short, or exec would fail after the access was logged.
+// The value is not echoed.
+func validateValue(name, value string) error {
+	if strings.ContainsRune(value, 0) {
+		return fmt.Errorf("vault: the value of %s contains a NUL byte, which an environment variable cannot carry", name)
 	}
 	return nil
 }
@@ -125,6 +139,9 @@ func (e *Entry) Validate() error {
 		// carrying one here would write it into cleartext metadata.
 		if v.Secret && v.Value != "" {
 			return fmt.Errorf("vault: %s is marked secret but carries a cleartext value", v.Name)
+		}
+		if err := validateValue(v.Name, v.Value); err != nil {
+			return err
 		}
 	}
 	return nil

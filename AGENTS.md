@@ -9,10 +9,16 @@ transcript.
 
 ```
 cmd/blindfold/          main; dispatches to internal/cli
-internal/vault/        metadata (cleartext) + sealed values, keychain
+internal/vault/        metadata (cleartext) + sealed values, key sources
 internal/cli/          every command
 internal/audit/        append-only access log
+scripts/               test.sh (what CI runs), build-*.sh (what ships), leak-test.sh
+docs/                  install, usage, security model — README stays a pitch
 ```
+
+Supported platforms: macOS and Linux. The master key lives in the macOS
+Keychain (`kek_darwin.go`, cgo) or the Linux Secret Service over D-Bus
+(`kek_linux.go`, pure Go); elsewhere, only in a key or passphrase file.
 
 ## Rules that are not negotiable
 
@@ -29,15 +35,24 @@ internal/audit/        append-only access log
 - **Metadata must stay free of secret material** so `ls` needs no key. A
   variable marked `Secret` may not carry a `Value`; `vault.Entry.Validate`
   enforces it and a test asserts the metadata file never contains plaintext.
-- **Public values are bound to the data key.** `dekAAD` covers the entry name
-  and every declared variable, so `vault.json` edited by hand cannot unseal;
-  `Put` re-binds on every change made through the CLI. Version-1 sealed files
-  are upgraded the first time the master key is in hand. An entry with no
-  secret has no data key and is not covered.
+- **Metadata is bound to the data key.** `dekAAD` covers the entry name,
+  description, tags and every declared variable, so `vault.json` edited by hand
+  cannot unseal; `Put` re-binds on every change made through the CLI. Every
+  entry has a data key, secrets or not, and every load opens it — an entry
+  added by hand has none and is refused. Older sealed files (versions 1 and 2)
+  are upgraded the first time the master key is in hand.
+- **A wrong key writes nothing.** `init` seals a check value under the master
+  key and `openSealed` verifies it before any write. `init` never adopts a key
+  it did not create for that directory, and `Put` refuses a directory `init`
+  never ran in.
 - **Errors never quote input that may be a value.** `readDotenv` names the line
   that failed, not its content: in a `.env`, a line is as likely a value as a key.
 - **Keychain access stays in one file, one exact-match query.** See
-  `internal/vault/kek_darwin.go`; `keychain_guard_test.go` enforces it.
+  `internal/vault/kek_darwin.go`; `keychain_guard_test.go` enforces it. On
+  Linux the same holds for the Secret Service: D-Bus only in `kek_linux.go`,
+  search by exactly service and account, more than one match refused;
+  `secret_service_guard_test.go` enforces it, and a new D-Bus method must be
+  added to its allowlist by hand.
 - **`get` and `export` refuse plaintext** unless `--force` when stdout is not a
   terminal *or* an agent-shell marker (`CLAUDECODE`, `CODEX_SANDBOX`, …) is set
   — a pty makes an agent's shell look like a terminal. One decision,
@@ -65,8 +80,15 @@ buffered, which desynchronizes every prompt after it.
 ## Testing
 
 ```bash
-go test ./...
+scripts/test.sh      # gofmt, vet, go test -race; what CI runs
 ```
+
+On Linux it starts a throwaway gnome-keyring — private session bus, temporary
+`XDG_DATA_HOME` and `XDG_RUNTIME_DIR` — and points
+`BLINDFOLD_TEST_SECRET_SERVICE` at that data directory. The Secret Service
+tests delete items, so they refuse to run against any other. Under `CI`, a missing shell (sh, dash, bash, zsh, fish) fails the run
+instead of skipping. `.github/workflows/ci.yml` runs it on Ubuntu and macOS,
+plus govulncheck.
 
 The tests that matter most are the adversarial ones: shell escaping and variable
 name validation in `internal/cli`, and AAD binding in `internal/vault`. When
@@ -82,10 +104,12 @@ password in six encodings. It needs docker and the `claude` CLI.
 git tag v0.2.0 && git push origin v0.2.0
 ```
 
-`.github/workflows/release.yml` runs the tests, then `scripts/build-macos.sh`,
-and attaches the result to a GitHub release. Run that script locally to get the
-same artifacts in `dist/` — the workflow calls it rather than reimplementing the
-build, so there is one definition of what ships.
+`.github/workflows/release.yml` runs the tests on each OS, then
+`scripts/build-macos.sh` (macOS universal) and `scripts/build-linux.sh` (static
+amd64 and arm64), and attaches the results to a GitHub release with one
+`checksums.txt` and a build attestation. Run those scripts locally to get the
+same artifacts in `dist/` — the workflow calls them rather than reimplementing
+the build, so there is one definition of what ships.
 
 Two things about the macOS build are easy to break:
 

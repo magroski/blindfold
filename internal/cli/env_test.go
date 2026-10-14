@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -74,6 +75,11 @@ func forEachShell(t *testing.T, shells []string, fn func(t *testing.T, shell str
 	for _, name := range shells {
 		t.Run(name, func(t *testing.T) {
 			path, err := exec.LookPath(name)
+			// CI installs every shell: a skip there would leave a quoting rule
+			// unchecked in the release gate.
+			if err != nil && os.Getenv("CI") != "" {
+				t.Fatalf("%s is not installed, and CI must test every shell", name)
+			}
 			if err != nil {
 				t.Skipf("%s is not installed", name)
 			}
@@ -557,5 +563,100 @@ func TestAddRejectsControlCharactersInFreeText(t *testing.T) {
 	h.mustRun("", "add", "staging-db", "--var", "DB_HOST=staging")
 	if code, _, _ := h.run("", "edit", "staging-db", "--describe", forged); code == 0 {
 		t.Error("edit accepted a control character in the description")
+	}
+}
+
+// Public values are not free text, so a newline is allowed in one — but
+// nothing a listing prints may drive the terminal or forge a row, including
+// metadata edited by hand, which no input check sees.
+func TestListingsNeutralizeControlCharacters(t *testing.T) {
+	h := newHarness(t)
+	const osc52 = "https://x\x1b]52;c;ZXZpbA==\x07"
+	h.mustRun("", "add", "cdp-es", "--var", "ES_ENDPOINT="+osc52, "--describe", "PLACEHOLDER")
+
+	path := filepath.Join(h.dir, vault.MetadataFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, path, strings.Replace(string(data), "PLACEHOLDER",
+		`\u001b[2J\nprod-db  DATABASE_URL*  production primary`, 1))
+
+	for _, args := range [][]string{{"show", "cdp-es"}, {"ls"}} {
+		out := h.mustRun("", args...)
+		if strings.ContainsAny(out, "\x1b\x07") {
+			t.Errorf("%v printed a control character: %q", args, out)
+		}
+		for _, line := range strings.Split(out, "\n") {
+			if strings.HasPrefix(line, "prod-db") {
+				t.Errorf("%v printed a forged row: %q", args, out)
+			}
+		}
+	}
+}
+
+// An entry name is unambiguous on a command line only if it cannot be read as
+// a flag.
+func TestAddRejectsEntryNamesThatLookLikeFlags(t *testing.T) {
+	h := newHarness(t)
+	if code, _, _ := h.run("v", "add", "--secret", "V", "--", "-force"); code == 0 {
+		t.Error("add accepted an entry named -force")
+	}
+}
+
+// Variable names never contain a dot, so in --set VAR=entry.VAR the entry is
+// everything before the last one — and an entry named with a dot is still
+// reachable on its own.
+func TestEnvSetResolvesDottedEntryNames(t *testing.T) {
+	h := newHarness(t)
+	h.mustRun("postgres://primary", "add", "prod.db", "--secret", "DATABASE_URL")
+
+	for _, set := range []string{"URL=prod.db", "URL=prod.db.DATABASE_URL"} {
+		if got := evalAndEcho(t, h.mustRun("", "env", "--set", set, "--quiet"), "URL"); got != "postgres://primary" {
+			t.Errorf("--set %s gave %q", set, got)
+		}
+	}
+
+	// "prod.db" now also reads as variable db of entry prod: refuse to guess.
+	h.mustRun("", "add", "prod", "--var", "db=replica")
+	if code, stdout, _ := h.run("", "env", "--set", "URL=prod.db"); code == 0 {
+		t.Errorf("an ambiguous --set was resolved: %s", stdout)
+	}
+}
+
+// An entry added to vault.json by hand was never bound to the master key, so
+// nothing vouches for it. Joining a load beside a sealed value, HTTPS_PROXY
+// would send the API key through whoever wrote it.
+func TestLoadsRefuseEntriesAddedByHand(t *testing.T) {
+	h := newHarness(t)
+	h.mustRun("the-key", "add", "cdp-es", "--var", "ES_ENDPOINT=https://logs.internal",
+		"--secret", "ES_API_KEY", "--tags", "cdp")
+
+	path := filepath.Join(h.dir, vault.MetadataFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta vault.Metadata
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatal(err)
+	}
+	meta.Entries = append(meta.Entries, vault.Entry{
+		Name: "zz-proxy", Tags: []string{"cdp"},
+		Vars: []vault.Var{{Name: "HTTPS_PROXY", Value: "http://attacker.example:8080"}},
+	})
+	if data, err = json.Marshal(meta); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, path, string(data))
+
+	for _, args := range [][]string{
+		{"env", "--tag", "cdp"}, {"env", "cdp-es", "zz-proxy"}, {"env", "zz-proxy"},
+		{"env", "cdp-es", "--set", "HTTPS_PROXY=zz-proxy"},
+	} {
+		code, stdout, _ := h.run("", args...)
+		if code == 0 || strings.Contains(stdout, "attacker") {
+			t.Errorf("%v loaded an entry added by hand (exit %d): %s", args, code, stdout)
+		}
 	}
 }

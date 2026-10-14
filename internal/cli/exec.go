@@ -34,8 +34,10 @@ Only the command sees the values; blindfold prints just the names it loaded:
   ` + Bin + ` exec --set DATABASE_URL=pg-ro -- ./migrate
 
 No shell runs in between, so $VAR on the command line is expanded by your shell
-before anything is loaded. To pass a value as an argument, let a shell inside
-the new environment expand it:
+before anything is loaded. Prefer programs that read the environment (psql
+reads PGPASSWORD). One that only takes an argument can get it from a shell
+inside the new environment — but argv is visible to every process on this
+machine while the command runs:
 
   ` + Bin + ` exec pg-ro -- sh -c 'psql "$DATABASE_URL"'`
 

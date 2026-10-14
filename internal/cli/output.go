@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/magroski/blindfold/internal/vault"
 )
@@ -25,6 +28,7 @@ func writeTable(w io.Writer, rows [][]string) {
 	widths := make([]int, len(rows[0]))
 	for _, row := range rows {
 		for i, cell := range row {
+			cell = printable(cell)
 			if i < len(widths) && len([]rune(cell)) > widths[i] {
 				widths[i] = len([]rune(cell))
 			}
@@ -34,6 +38,7 @@ func writeTable(w io.Writer, rows [][]string) {
 	for _, row := range rows {
 		var b strings.Builder
 		for i, cell := range row {
+			cell = printable(cell)
 			if i == len(row)-1 {
 				b.WriteString(cell)
 				break
@@ -49,9 +54,9 @@ func writeTable(w io.Writer, rows [][]string) {
 // printEntry renders one credential for a human. Sealed values are masked: this
 // output is routinely pasted into issues and chat.
 func printEntry(w io.Writer, e *vault.Entry) {
-	fmt.Fprintln(w, e.Name)
+	fmt.Fprintln(w, printable(e.Name))
 	if e.Description != "" {
-		fmt.Fprintf(w, "  %s\n", e.Description)
+		fmt.Fprintf(w, "  %s\n", printable(e.Description))
 	}
 	fmt.Fprintln(w)
 
@@ -66,6 +71,19 @@ func printEntry(w io.Writer, e *vault.Entry) {
 	writeTable(w, rows)
 
 	if len(e.Tags) > 0 {
-		fmt.Fprintf(w, "\n  tags: %s\n", strings.Join(e.Tags, " "))
+		fmt.Fprintf(w, "\n  tags: %s\n", printable(strings.Join(e.Tags, " ")))
 	}
+}
+
+// printable escapes text that would otherwise reach the terminal as control:
+// "a\nb" forges a row, "\x1b]52;c;…" writes the clipboard. Input checks catch
+// most of it; metadata edited by hand, and public values, skip them.
+//
+//	"ok"         → ok
+//	"x\x1b[2J"   → "x\x1b[2J" (quoted, escaped)
+func printable(s string) string {
+	if utf8.ValidString(s) && strings.IndexFunc(s, unicode.IsControl) < 0 {
+		return s
+	}
+	return strconv.Quote(s)
 }
