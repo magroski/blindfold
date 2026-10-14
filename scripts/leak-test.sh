@@ -57,28 +57,35 @@ printf '%s' "postgres://ro_agent:${PASSWORD}@127.0.0.1:${PORT}/analytics?sslmode
     --describe "Read-only replica used by the leak test." >/dev/null
 
 echo "==> running a real agent session against it"
-before="$(ls -1 "${PROJECT_SLUG}"/*.jsonl 2>/dev/null | sort || true)"
+# A known session id scopes the check to this run: other live sessions in the
+# project hold this script, password included, and would read as leaks.
+session_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 
-claude --plugin-dir . -p \
+claude --session-id "${session_id}" --plugin-dir . -p \
   "How many rows are in the candidates table, and what columns does it have?
    Use the pg-leak-test credential from blindfold." \
   --allowedTools "Bash" \
   >/dev/null
 
-after="$(ls -1 "${PROJECT_SLUG}"/*.jsonl 2>/dev/null | sort || true)"
-transcript="$(comm -13 <(printf '%s\n' "${before}") <(printf '%s\n' "${after}") | tail -1)"
+# The session's transcript, and its subagents' under <session>/subagents/.
+transcripts=()
+while IFS= read -r -d '' file; do
+  transcripts+=("${file}")
+done < <(find "${PROJECT_SLUG}" -name '*.jsonl' \( -path "${PROJECT_SLUG}/${session_id}.jsonl" \
+  -o -path "${PROJECT_SLUG}/${session_id}/*" \) -print0 2>/dev/null)
 
-if [[ -z "${transcript}" ]]; then
+if (( ${#transcripts[@]} == 0 )); then
   echo "FAIL: no new transcript was written, so there is nothing to check." >&2
   exit 1
 fi
 
-echo "==> checking ${transcript}"
-python3 - "${transcript}" "${PASSWORD}" <<'PY'
+echo "==> checking ${#transcripts[@]} transcript(s)"
+printf '    %s\n' "${transcripts[@]}"
+python3 - "${PASSWORD}" "${transcripts[@]}" <<'PY'
 import base64, json, sys, urllib.parse
 
-path, password = sys.argv[1], sys.argv[2]
-blob = open(path, "rb").read().decode("utf-8", "replace")
+password, paths = sys.argv[1], sys.argv[2:]
+blob = "".join(open(path, "rb").read().decode("utf-8", "replace") for path in paths)
 
 # A test that passes because the agent never used the credential proves nothing.
 if "blindfold exec" not in blob and "blindfold env" not in blob:

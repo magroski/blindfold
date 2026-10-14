@@ -29,7 +29,8 @@ build_arch() {
     -o "${BIN}-${goarch}" ./cmd/blindfold
 }
 
-rm -rf "${OUT}"
+# Only this script's outputs: build-linux.sh shares dist/.
+rm -f "${BIN}" "${OUT}/blindfold_darwin_universal.tar.gz"
 mkdir -p "${OUT}"
 
 build_arch arm64 arm64
@@ -53,7 +54,7 @@ codesign --verify --verbose=1 "${BIN}"
 echo "==> packaging"
 readonly TARBALL=blindfold_darwin_universal.tar.gz
 tar -czf "${OUT}/${TARBALL}" -C "${OUT}" blindfold
-(cd "${OUT}" && shasum -a 256 "${TARBALL}" > checksums.txt)
+(cd "${OUT}" && shasum -a 256 blindfold_*.tar.gz > checksums.txt)
 
 echo
 lipo -archs "${BIN}"

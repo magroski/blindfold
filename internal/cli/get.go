@@ -49,9 +49,13 @@ func cmdGet(env Env, args []string) error {
 
 	value := variable.Value
 	if variable.Secret {
-		if value, err = v.UnsealVar(entry.Name, variable.Name); err != nil {
-			return err
-		}
+		value, err = v.UnsealVar(entry.Name, variable.Name)
+	} else {
+		// Nothing to unseal, but opening the data key vouches for the value.
+		_, err = v.Unseal(entry.Name)
+	}
+	if err != nil {
+		return err
 	}
 
 	// --force skips the guard, so the value may have gone anywhere.

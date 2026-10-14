@@ -305,7 +305,7 @@ func TestValidateEntryNameRejectsPathAndShellCharacters(t *testing.T) {
 			t.Errorf("ValidateEntryName(%q) = %v, want nil", name, err)
 		}
 	}
-	for _, name := range []string{"", "../escape", "with space", "semi;colon", "sub/dir", "$(id)"} {
+	for _, name := range []string{"", "../escape", "with space", "semi;colon", "sub/dir", "$(id)", "-h", "--force"} {
 		if err := ValidateEntryName(name); err == nil {
 			t.Errorf("ValidateEntryName(%q) = nil, want a rejection", name)
 		}
@@ -364,6 +364,9 @@ func TestHandEditedMetadataCannotUnseal(t *testing.T) {
 		"public value changed":  func(e *Entry) { e.Vars[0].Value = "https://attacker.example" },
 		"public variable added": func(e *Entry) { e.Vars = append(e.Vars, Var{Name: "LD_PRELOAD", Value: "/tmp/evil.so"}) },
 		"public made secret":    func(e *Entry) { e.Vars[0] = Var{Name: "ES_ENDPOINT", Secret: true} },
+		// --tag selects by tag, and an agent picks by description.
+		"tag added":           func(e *Entry) { e.Tags = append(e.Tags, "prod") },
+		"description changed": func(e *Entry) { e.Description = "use this for production" },
 	}
 	for label, tamper := range tampers {
 		t.Run(label, func(t *testing.T) {
@@ -443,9 +446,43 @@ func TestLegacySealedFileIsUpgradedOnFirstUse(t *testing.T) {
 	}
 }
 
+// Version-2 files bound a data key to the variables alone, and an entry with no
+// secret had no data key. The first use re-binds the one and binds the other,
+// so tags and descriptions are covered and every entry is vouched for.
+func TestVersion2SealedFileIsUpgradedOnFirstUse(t *testing.T) {
+	v := newTestVault(t)
+	public := Entry{Name: "flags", Tags: []string{"cdp"}, Vars: []Var{{Name: "FEATURE_X", Value: "on"}}}
+	v.meta.Upsert(public)
+	e := sampleEntry()
+	writeSealedAs(t, v, sealedVersionVars, dekAADVars(&e), e, map[string]string{"ES_API_KEY": "k"})
+
+	if got, err := v.UnsealVar("cdp-es", "ES_API_KEY"); err != nil || got != "k" {
+		t.Fatalf("version-2 value = %q, %v; want k", got, err)
+	}
+	if _, err := v.Unseal("flags"); err != nil {
+		t.Errorf("public entry after upgrade: %v", err)
+	}
+
+	rewriteMetadata(t, v.Dir(), func(e *Entry) { e.Tags = append(e.Tags, "prod") })
+	reopened, err := Open(v.Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reopened.Unseal("cdp-es"); err == nil {
+		t.Error("an upgraded file still unseals under hand-edited tags")
+	}
+}
+
 // writeLegacySealed writes vault.json and a version-1 vault.sealed as 0.3.0
 // did: fields bound to "<entry>/<field>", the data key to "dek/<entry>" alone.
 func writeLegacySealed(t *testing.T, v *Vault, e Entry, values map[string]string) {
+	t.Helper()
+	writeSealedAs(t, v, sealedVersionLegacy, []byte("dek/"+e.Name), e, values)
+}
+
+// writeSealedAs writes vault.json and a vault.sealed holding one entry whose
+// data key is bound to dekAAD, as an older version would have.
+func writeSealedAs(t *testing.T, v *Vault, version int, dekAAD []byte, e Entry, values map[string]string) {
 	t.Helper()
 	kek, err := v.masterKey()
 	if err != nil {
@@ -455,7 +492,7 @@ func writeLegacySealed(t *testing.T, v *Vault, e Entry, values map[string]string
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrapped, err := seal(kek, dek, []byte("dek/"+e.Name))
+	wrapped, err := seal(kek, dek, dekAAD)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -465,7 +502,7 @@ func writeLegacySealed(t *testing.T, v *Vault, e Entry, values map[string]string
 			t.Fatal(err)
 		}
 	}
-	file := sealedFile{Version: 1, Entries: map[string]sealedEntry{e.Name: {WrappedDEK: wrapped, Fields: fields}}}
+	file := sealedFile{Version: version, Entries: map[string]sealedEntry{e.Name: {WrappedDEK: wrapped, Fields: fields}}}
 	data, err := json.MarshalIndent(file, "", "  ")
 	if err != nil {
 		t.Fatal(err)
@@ -502,5 +539,133 @@ func TestValidateRejectsControlCharactersInFreeText(t *testing.T) {
 		if err := e.Validate(); err == nil {
 			t.Errorf("Validate accepted %s", label)
 		}
+	}
+}
+
+// A key that already exists was not made for a directory with no vault in it.
+// Adopting it would seal new secrets under a key someone else may have
+// planted — on macOS, an item any process can read silently.
+func TestFreshDirectoryDoesNotAdoptAnExistingKey(t *testing.T) {
+	existing := newTestVault(t) // leaves BLINDFOLD_KEK_FILE holding a key
+	dir := filepath.Join(t.TempDir(), "fresh")
+
+	v, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Initialized() {
+		t.Error("a directory with no vault reports itself initialized")
+	}
+	if err := v.Put(sampleEntry(), map[string]string{"ES_API_KEY": "s3cr3t"}); err == nil {
+		t.Error("Put sealed a value into a directory init never ran in")
+	}
+	if err := v.Init(); err == nil || !strings.Contains(err.Error(), "did not create") {
+		t.Errorf("Init = %v, want a refusal to adopt the existing key", err)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("files were written to %s (stat: %v)", dir, err)
+	}
+	if !existing.Initialized() {
+		t.Error("the original vault no longer reports itself initialized")
+	}
+}
+
+// A key file committed by accident is worse than a vault committed by accident:
+// it opens every copy of the vault, past and future.
+func TestInitRefusesAKeyFileInsideGitRepo(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.Mkdir(filepath.Join(repo, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	keyFile := filepath.Join(repo, "secrets", "kek")
+	t.Setenv("BLINDFOLD_KEK_FILE", keyFile)
+	t.Setenv("BLINDFOLD_PASSPHRASE", "")
+
+	v, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Init(); err == nil || !strings.Contains(err.Error(), "git") {
+		t.Errorf("Init = %v, want a refusal naming the repository", err)
+	}
+	if _, err := os.Stat(keyFile); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the key was written into the repository (stat: %v)", err)
+	}
+}
+
+// An environment variable is a C string: a NUL would truncate the value, or
+// fail exec after the access was logged. Refused at the door, without quoting.
+func TestPutRejectsNULInValues(t *testing.T) {
+	v := newTestVault(t)
+	const secret = "before\x00after"
+	err := v.Put(sampleEntry(), map[string]string{"ES_API_KEY": secret})
+	if err == nil || strings.Contains(err.Error(), "before") {
+		t.Errorf("sealed value with NUL: %v", err)
+	}
+
+	public := sampleEntry()
+	public.Vars[0].Value = "https://x\x00y"
+	if err := v.Put(public, map[string]string{"ES_API_KEY": "k"}); err == nil {
+		t.Error("public value with NUL accepted")
+	}
+}
+
+// Relabelling an upgraded file as an older version, with one old-format data
+// key from a backup to pass for the key check, must not reopen the upgrade
+// window: an entry added by hand would be bound as it stands.
+func TestDowngradedSealedFileIsRefused(t *testing.T) {
+	v := newTestVault(t)
+	if err := v.Put(sampleEntry(), map[string]string{"ES_API_KEY": "k"}); err != nil {
+		t.Fatal(err)
+	}
+	backup := Entry{Name: "old", Vars: []Var{{Name: "OLD", Secret: true}}}
+	kek, err := v.masterKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dek, _ := newKey()
+	wrapped, err := seal(kek, dek, dekAADVars(&backup))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sealedPath := filepath.Join(v.Dir(), SealedFile)
+	data, err := os.ReadFile(sealedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var file sealedFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		t.Fatal(err)
+	}
+	file.Version, file.Check = sealedVersionVars, nil
+	file.Entries[backup.Name] = sealedEntry{WrappedDEK: wrapped, Fields: map[string]sealedBox{}}
+	if data, err = json.Marshal(file); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sealedPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	planted := Entry{Name: "zz-proxy", Vars: []Var{{Name: "HTTPS_PROXY", Value: "http://attacker.example"}}}
+	rewriteMetadata(t, v.Dir(), func(*Entry) {})
+	meta, _ := os.ReadFile(filepath.Join(v.Dir(), MetadataFile))
+	var m Metadata
+	if err := json.Unmarshal(meta, &m); err != nil {
+		t.Fatal(err)
+	}
+	m.Entries = append(m.Entries, backup, planted)
+	if meta, err = json.Marshal(m); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(v.Dir(), MetadataFile), meta, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(v.Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reopened.Unseal("zz-proxy"); err == nil {
+		t.Error("an entry added by hand was bound by a downgraded file")
 	}
 }

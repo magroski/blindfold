@@ -25,6 +25,9 @@ type keychainSource struct{}
 
 func newOSKeySource() KeySource { return &keychainSource{} }
 
+// KeychainInspect shows the item's attributes without its secret.
+const KeychainInspect = "security find-generic-password -s " + KeychainService + " -a " + KeychainAccount
+
 func (k *keychainSource) Describe() string {
 	return fmt.Sprintf("macOS Keychain item (service=%q account=%q) — the only item this binary reads",
 		KeychainService, KeychainAccount)

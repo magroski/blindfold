@@ -1,6 +1,7 @@
 name: release
 
-# Tagging v1.2.3 publishes a macOS universal binary for that tag.
+# Tagging v1.2.3 publishes, for that tag, a macOS universal binary and static
+# Linux binaries for amd64 and arm64. Each is tested and built on its own OS.
 #
 #   git tag v1.2.3 && git push origin v1.2.3
 on:
@@ -38,9 +39,12 @@ jobs:
 
       # The vault tests drive BLINDFOLD_KEK_FILE rather than the real keychain,
       # so they run unattended here. Releasing an artifact whose tests never ran
-      # would defeat the point of having adversarial ones.
+      # would defeat the point of having adversarial ones. fish is installed
+      # because the quoting tests fail, rather than skip, without it under CI.
       - name: Test
-        run: go test ./...
+        run: |
+          brew install fish
+          scripts/test.sh
 
       # Through env, not ${{ }} in the script: a dispatch input is text the
       # shell would otherwise parse as code.
@@ -59,14 +63,52 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: blindfold-darwin-universal
-          path: dist/
+          path: dist/*.tar.gz
+
+  linux:
+    # Pinned for the same reason as the macOS image.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: false
+
+      # scripts/test.sh runs the Secret Service tests against a throwaway
+      # gnome-keyring on a private session bus.
+      - name: Test
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zsh fish gnome-keyring dbus
+          scripts/test.sh
+
+      - name: Build
+        env:
+          VERSION: ${{ github.event.inputs.version || github.ref_name }}
+        run: scripts/build-linux.sh "$VERSION"
+
+      - name: Verify the artifacts are static and run
+        run: |
+          file dist/linux_amd64/blindfold | tee /dev/stderr | grep -q 'x86-64.*statically linked'
+          file dist/linux_arm64/blindfold | tee /dev/stderr | grep -q 'aarch64.*statically linked'
+          dist/linux_amd64/blindfold version
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: blindfold-linux
+          path: dist/*.tar.gz
 
   # Separate job so the write and signing permissions never coexist with test
   # or build code. The attestation is what lets a downloader check the tarball
   # came from this workflow; checksums.txt ships alongside it, so alone it only
   # catches corruption.
   publish:
-    needs: macos
+    needs: [macos, linux]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -76,13 +118,19 @@ jobs:
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: blindfold-darwin-universal
+          pattern: blindfold-*
           path: dist/
+          merge-multiple: true
+
+      # One checksums file across every platform's tarball, written here
+      # because no single build job sees them all.
+      - name: Checksums
+        run: cd dist && sha256sum blindfold_*.tar.gz | tee checksums.txt
 
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
-            dist/blindfold_darwin_universal.tar.gz
+            dist/blindfold_*.tar.gz
             dist/checksums.txt
 
       - name: Publish

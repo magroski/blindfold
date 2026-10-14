@@ -25,16 +25,25 @@ is all you need.
 
 ## Passing a value as an argument
 
+Prefer programs that read their credentials from the environment: `psql` reads
+`PGPASSWORD`, most SDKs read their own variables. An argument is visible to
+every process on the machine (`ps`) for as long as the command runs.
+
 No shell sits between `exec` and the command, so `$DATABASE_URL` on the command
-line is expanded by your shell — before anything is loaded, to nothing. Quote it
-and let a shell inside the new environment expand it:
+line is expanded by your shell — before anything is loaded, to nothing. When a
+program only takes an argument, quote it and let a shell inside the new
+environment expand it:
 
 ```bash
-blindfold exec pg-ro -- sh -c 'psql "$DATABASE_URL"'    ✅
+blindfold exec pg-ro -- sh -c 'psql "$DATABASE_URL"'    ✅ works; visible in ps while it runs
 ```
 ```bash
 blindfold exec pg-ro -- psql "$DATABASE_URL"            ❌ expanded too early, empty
 ```
+
+Never add verbose or tracing flags to a command holding a credential —
+`curl -v`, `set -x`, `--debug` — they print headers and arguments, and the
+output comes back to you.
 
 ## Loading one value under a chosen name
 
@@ -76,7 +85,9 @@ blindfold exec cdp-es -- python3 report.py
 
 For a program that takes a flag rather than an environment variable, pass the
 variable through without expanding it yourself — `sh -c 'psql "$DATABASE_URL"'`
-is fine, because that shell substitutes it and you never see it.
+keeps it out of the conversation, because that shell substitutes it. It is
+still in that process's argv, so prefer an environment variable when the
+program reads one.
 
 ## Do not read the values
 

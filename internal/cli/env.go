@@ -166,7 +166,10 @@ func resolveSet(v *vault.Vault, set string) (binding, error) {
 		return binding{}, err
 	}
 
-	entryName, varName, qualified := strings.Cut(ref, ".")
+	entryName, varName, qualified, err := splitRef(v, ref)
+	if err != nil {
+		return binding{}, err
+	}
 	entry, err := mustFind(v, entryName)
 	if err != nil {
 		return binding{}, err
@@ -188,18 +191,47 @@ func resolveSet(v *vault.Vault, set string) (binding, error) {
 		}
 	}
 
+	// Unsealed for a public variable too: opening the data key vouches for it.
+	values, err := secretValues(v, entry)
+	if err != nil {
+		return binding{}, err
+	}
 	value := variable.Value
 	if variable.Secret {
-		values, err := secretValues(v, entry)
-		if err != nil {
-			return binding{}, err
-		}
 		value = values[variable.Name]
 	}
 	return binding{
 		Name: target, Value: value, Secret: variable.Secret,
 		Entry: entry.Name, Var: variable.Name,
 	}, nil
+}
+
+// splitRef reads name[.VAR]. Variable names hold no dot, so the variable is
+// whatever follows the last one, and a ref naming an entry outright means that
+// entry. When both readings exist, refuse rather than pick:
+//
+//	prod.db.DATABASE_URL → DATABASE_URL of prod.db
+//	prod.db              → entry prod.db, or variable db of entry prod?
+func splitRef(v *vault.Vault, ref string) (entryName, varName string, qualified bool, err error) {
+	dot := strings.LastIndex(ref, ".")
+	_, whole := v.Get(ref)
+	if dot < 0 || (whole && !hasVar(v, ref[:dot], ref[dot+1:])) {
+		return ref, "", false, nil
+	}
+	if whole {
+		return "", "", false, fmt.Errorf("%q names both the credential %s and variable %s of %s; "+
+			"say which with %s.<VAR>", ref, ref, ref[dot+1:], ref[:dot], ref)
+	}
+	return ref[:dot], ref[dot+1:], true, nil
+}
+
+func hasVar(v *vault.Vault, entryName, varName string) bool {
+	entry, ok := v.Get(entryName)
+	if !ok {
+		return false
+	}
+	_, ok = entry.Var(varName)
+	return ok
 }
 
 // dedupe rejects two different values competing for one variable name. Silently
@@ -217,12 +249,10 @@ func dedupe(bindings []binding) error {
 	return nil
 }
 
-// secretValues unseals an entry's values, and returns an empty map when it has
-// no secrets — so a public-only credential never touches the master key.
+// secretValues unseals an entry's values. An entry with no secret is unsealed
+// too, for nothing: opening its data key is what proves vault.json was not
+// edited by hand to add or change it.
 func secretValues(v *vault.Vault, entry *vault.Entry) (map[string]string, error) {
-	if len(entry.SecretNames()) == 0 {
-		return map[string]string{}, nil
-	}
 	return v.Unseal(entry.Name)
 }
 

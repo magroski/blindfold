@@ -9,10 +9,13 @@ import (
 	"github.com/magroski/blindfold/internal/audit"
 )
 
-// fakeEnv is a getenv backed by a map, so the decision does not depend on the
-// shell running the tests — inside Claude Code, CLAUDECODE is set.
-func fakeEnv(vars map[string]string) func(string) string {
-	return func(name string) string { return vars[name] }
+// fakeEnv is a LookupEnv backed by a map, so the decision does not depend on
+// the shell running the tests — inside Claude Code, CLAUDECODE is set.
+func fakeEnv(vars map[string]string) func(string) (string, bool) {
+	return func(name string) (string, bool) {
+		value, ok := vars[name]
+		return value, ok
+	}
 }
 
 // clearAgentMarkers unsets every marker for one test, so a harness test sees
@@ -20,7 +23,8 @@ func fakeEnv(vars map[string]string) func(string) string {
 func clearAgentMarkers(t *testing.T) {
 	t.Helper()
 	for _, name := range agentShellMarkers {
-		t.Setenv(name, "")
+		t.Setenv(name, "") // restores the original after the test
+		os.Unsetenv(name)
 	}
 }
 
@@ -33,11 +37,13 @@ func TestPlaintextRefusal(t *testing.T) {
 	cases := []struct {
 		name   string
 		tty    bool
-		getenv func(string) string
+		lookup func(string) (string, bool)
 		force  bool
 		want   []string // conditions the reason names; none means allowed
 	}{
 		{"person at a terminal", true, clean, false, nil},
+		// `CLAUDECODE= blindfold get x` must not pass for a person's shell.
+		{"agent marker set but empty", true, fakeEnv(map[string]string{"CLAUDECODE": ""}), false, []string{"CLAUDECODE"}},
 		{"pipe", false, clean, false, []string{"not a terminal"}},
 		{"agent with a pty", true, agent, false, []string{"CLAUDECODE"}},
 		{"agent with a pipe", false, agent, false, []string{"not a terminal", "CLAUDECODE"}},
@@ -48,7 +54,7 @@ func TestPlaintextRefusal(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			reason := plaintextRefusal(c.tty, c.getenv, c.force)
+			reason := plaintextRefusal(c.tty, c.lookup, c.force)
 			if len(c.want) == 0 && reason != "" {
 				t.Fatalf("refused (%s), want allowed", reason)
 			}

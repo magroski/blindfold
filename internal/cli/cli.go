@@ -204,15 +204,18 @@ func cmdDoctor(env Env, args []string) error {
 	fmt.Fprintf(env.Stdout, "initialized   %t\n", v.Initialized())
 	fmt.Fprintf(env.Stdout, "credentials   %d\n", len(v.List()))
 
-	if *showKeychain {
-		fmt.Fprintf(env.Stdout, "\nThis binary reads exactly one keychain item and never enumerates:\n")
-		fmt.Fprintf(env.Stdout, "  class    generic password\n")
-		fmt.Fprintf(env.Stdout, "  service  %s\n", vault.KeychainService)
-		fmt.Fprintf(env.Stdout, "  account  %s\n", vault.KeychainAccount)
-		fmt.Fprintf(env.Stdout, "\nVerify independently with:\n")
-		fmt.Fprintf(env.Stdout, "  security find-generic-password -s %s -a %s\n",
-			vault.KeychainService, vault.KeychainAccount)
+	if !*showKeychain {
+		return nil
 	}
+	if vault.KeychainInspect == "" {
+		fmt.Fprintf(env.Stdout, "\nThis platform has no OS keychain; the master key comes from a file.\n")
+		return nil
+	}
+	fmt.Fprintf(env.Stdout, "\nThis binary reads exactly one keychain item and never enumerates:\n")
+	fmt.Fprintf(env.Stdout, "  service  %s\n", vault.KeychainService)
+	fmt.Fprintf(env.Stdout, "  account  %s\n", vault.KeychainAccount)
+	fmt.Fprintf(env.Stdout, "\nVerify independently, without printing the key:\n")
+	fmt.Fprintf(env.Stdout, "  %s\n", vault.KeychainInspect)
 	return nil
 }
 

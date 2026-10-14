@@ -33,6 +33,9 @@ const (
 	KeychainAccount = "vault-kek"
 )
 
+// keyFileHelp names the key sources that need no OS keychain.
+const keyFileHelp = "point BLINDFOLD_PASSPHRASE_FILE at a 0600 passphrase file, or BLINDFOLD_KEK_FILE at a 0600 key file"
+
 // Environment variables that select the key source; see NewKeySource.
 const (
 	envKEKFile        = "BLINDFOLD_KEK_FILE"
@@ -45,7 +48,7 @@ const (
 //	BLINDFOLD_KEK_FILE         a 0600 file holding a base64 master key
 //	BLINDFOLD_PASSPHRASE_FILE  a 0600 file holding a passphrase (CI, Linux, SSH)
 //	BLINDFOLD_PASSPHRASE       the passphrase itself; every child process inherits it
-//	(default)                 the OS keychain, where one is available
+//	(default)                 the OS keychain: macOS Keychain, or Secret Service on Linux
 func NewKeySource(dir string) KeySource {
 	saltPath := filepath.Join(dir, "kek.salt")
 	if path := os.Getenv(envKEKFile); path != "" {
@@ -96,6 +99,11 @@ func (f *fileSource) Load() ([]byte, error) {
 }
 
 func (f *fileSource) Store(key []byte) error {
+	// Committed by accident, the key would open every copy of the vault.
+	if repo, inRepo := enclosingGitRepo(filepath.Dir(f.path)); inRepo {
+		return fmt.Errorf("vault: refusing to write the master key inside the git repository at %s; "+
+			"keys belong outside version control", repo)
+	}
 	if err := os.MkdirAll(filepath.Dir(f.path), 0o700); err != nil {
 		return err
 	}

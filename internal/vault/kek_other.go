@@ -1,4 +1,4 @@
-//go:build !darwin
+//go:build !darwin && !linux
 
 package vault
 
@@ -10,8 +10,10 @@ type unsupportedOSKeySource struct{}
 
 func newOSKeySource() KeySource { return &unsupportedOSKeySource{} }
 
-const noKeychainHelp = "vault: no OS keychain on this platform; " +
-	"point BLINDFOLD_PASSPHRASE_FILE at a 0600 passphrase file, or BLINDFOLD_KEK_FILE at a 0600 key file"
+const noKeychainHelp = "vault: no OS keychain on this platform; " + keyFileHelp
+
+// KeychainInspect is empty: there is no keychain item to inspect.
+const KeychainInspect = ""
 
 func (unsupportedOSKeySource) Describe() string { return "unavailable (no OS keychain)" }
 
