@@ -110,9 +110,9 @@ codex plugin list                  # blindfold@blindfold  installed, enabled
 ## 3. Permission rules
 
 Optional, recommended. Claude Code permission rules make every value-printing
-path, and every change to the vault, a deliberate act. A change matters as much
-as a print: a public endpoint repointed with `edit --var` takes the secret
-beside it along the next time `exec` runs.
+path, every change to the vault, and every copy to another box a deliberate
+act. A change matters as much as a print: a public endpoint repointed with
+`edit --var` takes the secret beside it along the next time `exec` runs.
 
 In `~/.claude/settings.json`, or per project in `.claude/settings.json`:
 
@@ -122,7 +122,10 @@ In `~/.claude/settings.json`, or per project in `.claude/settings.json`:
     "ask": [
       "Bash(blindfold env:*)", "Bash(blindfold get:*)", "Bash(blindfold export:*)",
       "Bash(blindfold add:*)", "Bash(blindfold edit:*)", "Bash(blindfold rm:*)",
-      "Bash(blindfold remove:*)", "Bash(blindfold import:*)", "Bash(blindfold init:*)"
+      "Bash(blindfold remove:*)", "Bash(blindfold import:*)", "Bash(blindfold init:*)",
+      "Bash(blindfold remote:*)", "Bash(blindfold sync:*)", "Bash(blindfold push:*)",
+      "Bash(blindfold pull:*)", "Bash(blindfold sync-serve:*)",
+      "Bash(ssh:*)", "Bash(scp:*)", "Bash(sftp:*)", "Bash(rsync:*)"
     ]
   }
 }
@@ -135,4 +138,10 @@ full command, which is the check you want.
 
 Prefix rules match how a command starts. A wrapper — `sh -c '…'`, `env -u X …`,
 `script … blindfold get` — starts differently, so keep broad rules such as
-`Bash(sh:*)` out of `allow` too.
+`Bash(sh:*)` out of `allow` too. `ssh` is the wrapper that matters once you
+sync: a box set up for it opens its vault to any ssh session, so
+`ssh box blindfold get NAME --force` prints a value, and no `blindfold` rule
+sees it. The rules above make every command that starts with `ssh`, `scp`,
+`sftp` or `rsync` a deliberate act; one that reaches ssh another way
+(`/usr/bin/ssh`, `git -c core.sshCommand=…`) starts differently and is not
+caught.

@@ -106,6 +106,76 @@ docker run --env-file <(blindfold export pg-ro --force --raw) app
 `--raw` prints values unquoted for `docker --env-file`. Never source raw output
 in a shell: a value like `$(cmd)` would run.
 
+## Across dev boxes
+
+Copy credentials between this machine and your other dev boxes over SSH. Every
+transfer runs between here and one box, never box to box.
+
+```bash
+blindfold remote add mac-box me@mac.local          # any ssh destination or ~/.ssh/config alias
+blindfold remote add linux-box dev-linux --bin ~/go/bin/blindfold
+blindfold sync                                      # compare every box with this one
+```
+
+```
+#  ENTRY    here  linux-box  mac-box
+1  openai   ●     —          —
+2  pg-ro    ●     ≠          ●
+3  stripe   —     ●          ●
+
+● present  ≠ differs from here  — missing  ? unreachable
+
+push <#,#> <box>...  |  pull <#,#> <box>  |  Enter to quit
+> push 1 mac-box linux-box
+```
+
+At a terminal, `sync` asks what to copy, and asks again before replacing an
+entry that differs. From a script it prints the table only. The same, without
+the picker:
+
+```bash
+blindfold push mac-box openai                 # here → box
+blindfold pull mac-box stripe                 # box → here
+blindfold push linux-box pg-ro --overwrite    # replace an entry that differs
+```
+
+A credential travels whole — description, tags, every variable — and is sealed
+on arrival under the receiving vault's own master key. `≠` compares secret
+values too, without sending them. Removing an entry is never copied. Each
+entry stored prints its variable names (`stripe  created: STRIPE_KEY`); read
+them. One declaring a variable that can make a program run code, load its
+configuration from elsewhere, skip certificate checks or send its traffic
+elsewhere — `LD_PRELOAD`, `GIT_SSH_COMMAND`, `MAKEFLAGS`, `HOME`,
+`HTTPS_PROXY` and the like — is refused; add it by hand where it is meant.
+Endpoints such as `OPENAI_BASE_URL` travel. That is a list, and no list is
+complete.
+
+### Setting up a box
+
+Each box needs blindfold, an initialized vault, and a master key that loads in
+a **non-interactive** ssh session, which reads fewer startup files than your
+terminal does:
+
+- **blindfold not found:** point at it with `--bin` when adding the box.
+- **Linux without a desktop session:** use a passphrase file, exported where
+  `ssh box cmd` sees it — `~/.zshenv` for zsh; for bash, the first line of
+  `~/.bashrc`, above any line that returns early for non-interactive shells.
+- **macOS:** the Keychain may be locked in an ssh session; unlock it with
+  `security unlock-keychain`, or use a key or passphrase file.
+
+A box set up this way opens its vault to anything that can ssh in as you,
+an agent included: keep `ssh`, `scp`, `sftp` and `rsync` in the `ask` list
+(see [security](security.md#between-dev-boxes)). Install the same blindfold
+on every machine: an older one that writes the vault forgets the box list
+(`remote add` again; no credential is lost).
+
+Check a box with `ssh <box> blindfold doctor`. When a box fails, `sync` and
+`push` show its own message and change nothing. A box gets 60 seconds to
+answer each request, ssh's own prompts included; one that does not is
+dropped — though a push it had received may still be stored once it gets
+there, so check with `sync`. The picker waiting on you is not a request and
+never times out. One push carries up to about 9 MiB of values.
+
 ## Auditing
 
 ```bash
@@ -139,6 +209,10 @@ log that cannot be written never blocks a command; it prints
 | `get <name>` | print one value (terminal only) |
 | `export <name>` | print `KEY='VALUE'` lines (terminal only) |
 | `audit` | recent credential access |
+| `remote add <box> <dest>` | register a dev box; `remote ls`, `remote rm <box>` |
+| `sync [box...]` | compare boxes with this one; at a terminal, push and pull |
+| `push <box> <name>...` | copy credentials to a box |
+| `pull <box> <name>...` | copy credentials from a box |
 | `doctor` | vault and key-source health; `--keychain` shows the one item read |
 
 `blindfold <command> -h` lists a command's flags.

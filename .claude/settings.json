@@ -10,7 +10,16 @@
       "Bash(blindfold rm:*)",
       "Bash(blindfold remove:*)",
       "Bash(blindfold import:*)",
-      "Bash(blindfold init:*)"
+      "Bash(blindfold init:*)",
+      "Bash(blindfold remote:*)",
+      "Bash(blindfold sync:*)",
+      "Bash(blindfold push:*)",
+      "Bash(blindfold pull:*)",
+      "Bash(blindfold sync-serve:*)",
+      "Bash(ssh:*)",
+      "Bash(scp:*)",
+      "Bash(sftp:*)",
+      "Bash(rsync:*)"
     ]
   }
 }

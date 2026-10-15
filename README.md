@@ -36,6 +36,9 @@ convenient path the safe one.
 - **Tamper-evident.** Edit the metadata by hand to repoint an endpoint, and the
   secret stops unsealing instead of following it.
 - **Audited.** Every load is logged — names, never values.
+- **Across dev boxes.** `blindfold sync` compares this machine with your other
+  boxes over SSH; push or pull a credential without it ever leaving a vault in
+  plaintext.
 - **Agent-ready.** A skill for Claude Code and Codex CLI teaches the pattern.
   Without one, it is a plain CLI.
 

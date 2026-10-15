@@ -82,8 +82,15 @@ func printEntry(w io.Writer, e *vault.Entry) {
 //	"ok"         → ok
 //	"x\x1b[2J"   → "x\x1b[2J" (quoted, escaped)
 func printable(s string) string {
-	if utf8.ValidString(s) && strings.IndexFunc(s, unicode.IsControl) < 0 {
+	if utf8.ValidString(s) && strings.IndexFunc(s, unsafeRune) < 0 {
 		return s
 	}
 	return strconv.Quote(s)
+}
+
+// unsafeRune is a control character, or a bidi control that would reorder
+// what follows it on screen: "‮" makes "evil‮txt.exe" read as
+// "eviltxt.exe" backwards.
+func unsafeRune(r rune) bool {
+	return unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r)
 }
