@@ -81,6 +81,10 @@ func (v *Vault) Dir() string { return v.dir }
 // KeySourceDescription reports where the master key comes from, for `blindfold doctor`.
 func (v *Vault) KeySourceDescription() string { return v.keys.Describe() }
 
+// Exists reports whether init has run here. Unlike Initialized, it never
+// touches the master key.
+func (v *Vault) Exists() bool { return v.exists }
+
 // Initialized reports whether init has run here and the master key loads.
 func (v *Vault) Initialized() bool {
 	if !v.exists {

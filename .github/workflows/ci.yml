@@ -42,5 +42,11 @@ jobs:
       - name: Test
         run: scripts/test.sh
 
+      # Push and pull over real OpenSSH to a Linux box in a container. macOS
+      # runners have no docker; run the script locally to cover macOS.
+      - name: Sync over OpenSSH (Linux)
+        if: runner.os == 'Linux'
+        run: scripts/sync-e2e.sh
+
       - name: Vulnerability scan
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...

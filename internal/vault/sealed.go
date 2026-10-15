@@ -68,7 +68,9 @@ type sealedFile struct {
 	// Check is an empty value sealed under the KEK. A mistyped passphrase
 	// derives a key that opens nothing; without a check it would seal new
 	// entries anyway and split the vault between two keys.
-	Check   *sealedBox             `json:"check,omitempty"`
+	Check *sealedBox `json:"check,omitempty"`
+	// Remotes is the box registry, sealed so it cannot be repointed by hand.
+	Remotes *sealedBox             `json:"remotes,omitempty"`
 	Entries map[string]sealedEntry `json:"entries"`
 }
 

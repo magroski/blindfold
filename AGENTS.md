@@ -12,7 +12,9 @@ cmd/blindfold/          main; dispatches to internal/cli
 internal/vault/        metadata (cleartext) + sealed values, key sources
 internal/cli/          every command
 internal/audit/        append-only access log
-scripts/               test.sh (what CI runs), build-*.sh (what ships), leak-test.sh
+internal/boxsync/      push/pull between dev boxes: ssh transport, E2E channel, protocol
+scripts/               test.sh (what CI runs), build-*.sh (what ships), leak-test.sh,
+                       sync-e2e.sh (push/pull to a Linux box over real OpenSSH)
 docs/                  install, usage, security model — README stays a pitch
 ```
 
@@ -64,7 +66,19 @@ Keychain (`kek_darwin.go`, cgo) or the Linux Secret Service over D-Bus
   also drops `BLINDFOLD_PASSPHRASE` from the command's environment. The commands
   that change the vault — `add`, `edit`, `rm`, `import`, `init` — go in `ask`
   beside `env`, `get` and `export`: `edit --var` can repoint a public endpoint,
-  and the secret beside it would follow.
+  and the secret beside it would follow. So do `remote`, `sync`, `push`, `pull`
+  and `sync-serve`: they copy credentials to other machines.
+- **Values cross between boxes only inside the encrypted channel.**
+  `internal/boxsync` runs the system `ssh` and, inside it, its own X25519 +
+  XChaCha20-Poly1305 session, so `sync-serve`'s stdout is never plaintext.
+  Transfers are always here ⇄ one box. The box list is sealed in
+  `vault.sealed`; a box's `--bin` is held to characters every shell reads
+  literally, because it reaches the box's login shell unquoted.
+  `scripts/sync-e2e.sh` proves it against a Linux box over real OpenSSH.
+  ssh runs from one call in `internal/boxsync/ssh.go`, fixed arguments first;
+  `ssh_guard_test.go` enforces it. A box gets 60 seconds to answer each
+  request; an idle session never times out, because the picker waits on a
+  person.
 
 ## Reading several secrets
 
@@ -88,7 +102,8 @@ On Linux it starts a throwaway gnome-keyring — private session bus, temporary
 `BLINDFOLD_TEST_SECRET_SERVICE` at that data directory. The Secret Service
 tests delete items, so they refuse to run against any other. Under `CI`, a missing shell (sh, dash, bash, zsh, fish) fails the run
 instead of skipping. `.github/workflows/ci.yml` runs it on Ubuntu and macOS,
-plus govulncheck.
+plus govulncheck, and `scripts/sync-e2e.sh` on Ubuntu (macOS runners have no
+docker).
 
 The tests that matter most are the adversarial ones: shell escaping and variable
 name validation in `internal/cli`, and AAD binding in `internal/vault`. When

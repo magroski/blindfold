@@ -115,6 +115,51 @@ if any other file reaches either API, or if a query is widened, an item deleted
 or a collection listed. `blindfold doctor --keychain` prints a command that
 shows the item without its secret.
 
+## Between dev boxes
+
+`push`, `pull` and `sync` run the system `ssh` — your config, agent and
+`known_hosts` — with agent, X11 and port forwarding off, and start
+`blindfold sync-serve` on the box. Inside that SSH channel the two blindfolds
+encrypt again, end to end:
+
+```
+here                                         box
+  hello: X25519 public key  ──────────────▶
+                            ◀──────────────  hello: X25519 public key
+  HKDF-SHA256 → one key per direction, one for digests
+  XChaCha20-Poly1305 frames, numbered       ◀──────▶
+```
+
+- **No plaintext on any stdout.** Without the inner layer, an agent running
+  `ssh box blindfold sync-serve` could read values off the stream. A frame
+  altered, replayed, reordered or reflected ends the session, as does one over
+  16 MiB. A process that implements the handshake can still ask for values:
+  like `get --force`, that is deliberate work, not an accident, and
+  `sync-serve` refuses to run in a shell carrying an agent marker.
+- **A box answers only for what was asked.** A pull answered with another
+  entry, or one twice, is refused before anything is stored; so are push
+  results for an entry never sent. An entry left out of an answer fails. Text
+  from a box is escaped before it reaches the terminal.
+- **Nothing secret in argv.** ssh's arguments are fixed options, the
+  destination and `<bin> sync-serve`.
+- **Each vault keeps its own key.** Values are re-sealed on arrival under the
+  receiving vault's master key; no key leaves a machine.
+- **Comparison without values.** `sync` exchanges keyed digests, valid only in
+  that session.
+- **The box list is sealed.** It lives in `vault.sealed` under the master
+  key, so a list written or copied in from elsewhere is refused before ssh
+  runs. Rolling back to a list this vault sealed earlier is not detected: it
+  can only restore a box you once added, and whoever can write
+  `~/.blindfold` can as easily edit `~/.ssh/config`, which decides where a
+  destination connects.
+- **Both sides audit.** Here: `push`, `pull` and each `sync` comparison,
+  naming the box; a push the box refused is logged too, since its values were
+  sent. On the box: `sync-serve`, naming the ssh client's address.
+
+A push hands the credential to that box and to anyone who controls it. blindfold
+trusts your SSH setup to reach the right machine; it cannot do better than
+`known_hosts`.
+
 ## What blindfold refuses
 
 Failing loudly beats quietly downgrading:
@@ -130,6 +175,9 @@ Failing loudly beats quietly downgrading:
 - Entry names that read as flags, values containing NUL, control characters in
   descriptions and tags.
 - Two loaded entries setting one variable to different values.
+- Replacing an entry that differs on the receiving box without `--overwrite`
+  or a yes in the picker; a box list sealed under another key; an ssh
+  destination that reads as an option.
 - Echoing a secret when the terminal cannot hide input.
 
 Errors never quote a value. Listings escape control characters, so a hand-edited

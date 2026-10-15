@@ -40,6 +40,16 @@ func plaintextRefusal(isTerminal bool, lookupEnv func(string) (string, bool), fo
 	if !isTerminal {
 		reasons = append(reasons, notTerminal)
 	}
+	if reason := agentShellReason(lookupEnv); reason != "" {
+		reasons = append(reasons, reason)
+	}
+	return strings.Join(reasons, reasonSep)
+}
+
+// agentShellReason names the agent markers set, e.g. "CLAUDECODE is set (an
+// agent's shell)", or returns "" outside any agent's shell.
+func agentShellReason(lookupEnv func(string) (string, bool)) string {
+	var reasons []string
 	for _, marker := range agentShellMarkers {
 		if _, set := lookupEnv(marker); set {
 			reasons = append(reasons, marker+" is set (an agent's shell)")

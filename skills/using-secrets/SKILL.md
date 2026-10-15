@@ -101,8 +101,10 @@ blindfold exec cdp-es -- env            ❌ same
 cat .env                               ❌ don't hunt for credentials elsewhere
 ```
 
-There is a `blindfold get`, and it exists for the human who owns the vault. If
-you genuinely cannot proceed without a value, say so and let them run it.
+There is a `blindfold get`, and it exists for the human who owns the vault. So
+do `blindfold push`, `pull` and `sync`, which copy credentials to other
+machines: never run them yourself. If you genuinely cannot proceed without a
+value, say so and let them run it.
 
 ## When something is missing
 

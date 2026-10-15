@@ -47,6 +47,15 @@ const usage = `blindfold — keep credentials out of your agent's transcript
   blindfold audit                   show recent credential access
   blindfold doctor                  report vault and key-source health
 
+Across dev boxes, always between this machine and one box, over ssh:
+
+  blindfold remote add <box> <dest> register a box (an ssh destination)
+  blindfold remote ls|rm [box]      list boxes, or forget one
+  blindfold sync [box...]           compare every box with this one; at a
+                                    terminal, pick what to push or pull
+  blindfold push <box> <name>...    copy credentials to a box
+  blindfold pull <box> <name>...    copy credentials from a box
+
 Using a credential — the variables land in the environment of one command,
 not in the conversation:
 
@@ -91,6 +100,16 @@ func Run(_ context.Context, env Env, args []string) int {
 		err = cmdAudit(env, rest)
 	case "doctor":
 		err = cmdDoctor(env, rest)
+	case "remote":
+		err = cmdRemote(env, rest)
+	case syncCommand:
+		err = cmdSync(env, rest)
+	case pushCommand:
+		err = cmdPush(env, rest)
+	case pullCommand:
+		err = cmdPull(env, rest)
+	case serveCommand:
+		err = cmdSyncServe(env, rest)
 	case "help", "-h", "--help":
 		fmt.Fprintln(env.Stdout, usage)
 		return 0
