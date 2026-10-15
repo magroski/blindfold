@@ -1,6 +1,6 @@
 {
   "name": "blindfold",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Give coding agents your databases, APIs, and env vars without the values landing in the transcript. The agent loads a credential into the environment of the command it runs, and never sees the value.",
   "author": {
     "name": "magroski",
