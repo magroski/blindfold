@@ -146,9 +146,25 @@ func TestCallGivesUpOnAHungBox(t *testing.T) {
 	if _, err := session.Push(local, []string{"cdp-es"}, false); !errors.Is(err, errTimeout) {
 		t.Errorf("Push = %v, want a timeout", err)
 	}
-	// The session is over: later calls say why, not "file already closed".
+	// The session is over: later calls say why, not "file already closed",
+	// and a push after it sent nothing.
 	if _, err := session.Status(local); !errors.Is(err, errTimeout) {
 		t.Errorf("Status after a timeout = %v, want the timeout again", err)
+	}
+	var notSent *NotSentError
+	if _, err := session.Push(local, []string{"cdp-es"}, false); !errors.As(err, &notSent) {
+		t.Errorf("Push after a timeout = %v, want it reported as not sent", err)
+	}
+}
+
+// A box whose blindfold starts and then fails says why above; the hint about
+// installing blindfold is for a command the box's shell could not find.
+func TestDialPointsAtTheBoxsOwnMessage(t *testing.T) {
+	fakeSSH(t, `echo "blindfold: vault: vault.json has version 1" >&2; exit 1`)
+
+	_, err := Dial(vault.Remote{Name: "box", Destination: "box", Bin: vault.DefaultRemoteBin}, "test", io.Discard)
+	if err == nil || strings.Contains(err.Error(), "--bin") || !strings.Contains(err.Error(), "message is above") {
+		t.Errorf("Dial = %v, want it to point at the box's message", err)
 	}
 }
 

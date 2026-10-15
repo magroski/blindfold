@@ -59,12 +59,13 @@ func pickOnce(env Env, view *syncView, p *prompter, fields []string) error {
 	if op == pullCommand && len(boxes) != 1 {
 		return errors.New("pull from one box at a time")
 	}
+	// One box failing does not stop the others.
 	for _, name := range boxes {
 		b, err := view.box(name)
-		if err != nil {
-			return err
+		if err == nil {
+			err = pickTransfer(env, view, p, b, op, names)
 		}
-		if err := pickTransfer(env, view, p, b, op, names); err != nil {
+		if err != nil {
 			fmt.Fprintf(env.Stderr, "%v\n", err)
 		}
 	}

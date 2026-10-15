@@ -35,6 +35,10 @@ func Serve(v *vault.Vault, r io.Reader, w io.Writer, version string, observe fun
 // handle answers one request. Failures travel back as errors; vault errors
 // never quote a value.
 func handle(v *vault.Vault, ch *Channel, req request, observe func(Access)) response {
+	// The session may be long; other processes may have changed the vault.
+	if err := v.Reload(); err != nil {
+		return response{Error: err.Error()}
+	}
 	if !v.Exists() {
 		return response{Error: errNoVault}
 	}

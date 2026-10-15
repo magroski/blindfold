@@ -146,13 +146,14 @@ here                                         box
   results for an entry never sent, an unknown outcome, and an entry name no
   vault would accept. An entry left out of an answer fails. Text from a box
   is escaped before it reaches the terminal, bidi controls included.
-- **A copy is whole, and loads no code.** An entry missing a value for a
-  secret it declares is refused rather than merged with the one already
+- **A copy is whole, and carries no known hijack.** An entry missing a value
+  for a secret it declares is refused rather than merged with the one already
   there: a box cannot keep your key under its endpoint. An entry declaring a
-  variable that makes programs load code — `LD_PRELOAD`, `DYLD_*`,
-  `NODE_OPTIONS`, `GIT_SSH_COMMAND`, `PATH` and the like — is refused both
-  ways; add it by hand where it is meant. Every entry stored prints its
-  variable names.
+  variable that can make a program run code or send its traffic elsewhere —
+  `LD_PRELOAD`, `NODE_OPTIONS`, `GIT_SSH_COMMAND`, `GIT_EXTERNAL_DIFF`,
+  `PAGER`, `HTTPS_PROXY`, `PATH` and the like, any case — is refused both
+  ways; add it by hand where it is meant. That is a list, and no list is
+  complete: every entry stored prints its variable names, for you to read.
 - **Nothing secret in argv.** ssh's arguments are fixed options, the
   destination and `<bin> sync-serve`.
 - **Each vault keeps its own key.** Values are re-sealed on arrival under the
@@ -192,8 +193,8 @@ Failing loudly beats quietly downgrading:
 - Two loaded entries setting one variable to different values.
 - Replacing an entry that differs on the receiving box without `--overwrite`
   or a yes in the picker; a copied entry missing a secret value, or declaring
-  a code-loading variable; a box list sealed under another key; an ssh
-  destination that reads as an option.
+  a variable that runs code or redirects traffic; a box list sealed under
+  another key; an ssh destination that reads as an option.
 - Echoing a secret when the terminal cannot hide input.
 
 Errors never quote a value. Listings escape control characters, so a hand-edited

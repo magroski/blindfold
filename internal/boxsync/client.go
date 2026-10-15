@@ -58,6 +58,9 @@ func (s *Session) Close() error {
 
 // Status compares every entry here and on the box, by digest.
 func (s *Session) Status(local *vault.Vault) (map[string]State, error) {
+	if err := local.Reload(); err != nil {
+		return nil, err
+	}
 	resp, err := s.call(request{Op: OpStatus})
 	if err != nil {
 		return nil, err
@@ -99,6 +102,9 @@ func (s *Session) Status(local *vault.Vault) (map[string]State, error) {
 // Push copies whole entries from here to the box. Names are resolved here
 // before anything is sent; a failure doing so is a NotSentError.
 func (s *Session) Push(local *vault.Vault, names []string, overwrite bool) ([]Result, error) {
+	if err := local.Reload(); err != nil {
+		return nil, &NotSentError{Err: err}
+	}
 	credentials, err := export(local, names)
 	if err != nil {
 		return nil, &NotSentError{Err: err}
@@ -124,6 +130,9 @@ func (s *Session) Push(local *vault.Vault, names []string, overwrite bool) ([]Re
 
 // Pull copies whole entries from the box to here.
 func (s *Session) Pull(local *vault.Vault, names []string, overwrite bool) ([]Result, error) {
+	if err := local.Reload(); err != nil {
+		return nil, err
+	}
 	resp, err := s.call(request{Op: OpPull, Names: names})
 	if err != nil {
 		return nil, err
@@ -202,15 +211,20 @@ func (e *RemoteError) Error() string { return e.Msg }
 // not.
 func (s *Session) call(req request) (response, error) {
 	if s.ended != nil {
-		return response{}, s.ended
+		return response{}, &NotSentError{Err: s.ended}
 	}
 	var resp response
+	var sendErr error
 	err := withinTimeout(s.abort, func() error {
-		if err := s.ch.Send(req); err != nil {
-			return err
+		if sendErr = s.ch.Send(req); sendErr != nil {
+			return sendErr
 		}
 		return s.ch.Receive(&resp)
 	})
+	// Refused before a byte was written: the session goes on.
+	if errors.Is(sendErr, errTooLargeToSend) {
+		return response{}, &NotSentError{Err: sendErr}
+	}
 	if err != nil {
 		s.ended = err
 		return response{}, err
@@ -230,7 +244,7 @@ func withinTimeout(abort func(), exchange func() error) error {
 	timer := time.AfterFunc(answerTimeout, abort)
 	err := exchange()
 	if !timer.Stop() {
-		return fmt.Errorf("%w (%v); the session was ended", errTimeout, answerTimeout)
+		return fmt.Errorf("%w (%v); the session was ended, and what was sent may still be stored there", errTimeout, answerTimeout)
 	}
 	return err
 }

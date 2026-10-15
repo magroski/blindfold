@@ -46,15 +46,24 @@ var processFiles = map[string]bool{
 
 // processImports start programs, or reach code that can ("C" calls execvp
 // as readily as anything else).
-var processImports = map[string]bool{"os/exec": true, "syscall": true, "golang.org/x/sys/unix": true, "C": true}
+var processImports = map[string]bool{
+	"os/exec": true, "golang.org/x/sys/execabs": true, "syscall": true, "golang.org/x/sys/unix": true, "C": true,
+}
+
+// execPackages declare Cmd, which runs whatever Path it is given.
+var execPackages = map[string]bool{"os/exec": true, "golang.org/x/sys/execabs": true}
+
+// cmdFields, assigned after the one call, would replace what it runs.
+var cmdFields = map[string]bool{"Path": true, "Args": true}
 
 // processStarters are the functions, by import path, that run another program.
 // An exec.Cmd literal counts too: it runs whatever Path it is given.
 var processStarters = map[string][]string{
-	"os/exec":               {"Command", "CommandContext"},
-	"os":                    {"StartProcess"},
-	"syscall":               {"Exec", "ForkExec", "StartProcess"},
-	"golang.org/x/sys/unix": {"Exec"},
+	"os/exec":                  {"Command", "CommandContext"},
+	"golang.org/x/sys/execabs": {"Command", "CommandContext"},
+	"os":                       {"StartProcess"},
+	"syscall":                  {"Exec", "ForkExec", "StartProcess"},
+	"golang.org/x/sys/unix":    {"Exec"},
 }
 
 // pinned are set once, where ssh.go declares them. Assigning, shadowing or
@@ -64,7 +73,7 @@ var pinned = map[string]bool{sshIdent: true, sshArgsIdent: true}
 // checkSSHUse lists every way the Go file at path (repo-relative, slash
 // separated) could run ssh other than ssh.go's one call.
 func checkSSHUse(path, src string) []string {
-	file, err := parser.ParseFile(token.NewFileSet(), path, src, parser.SkipObjectResolution)
+	file, err := parser.ParseFile(token.NewFileSet(), path, src, parser.SkipObjectResolution|parser.ParseComments)
 	if err != nil {
 		// Source we cannot parse is source we cannot vouch for.
 		return []string{"cannot parse: " + err.Error()}
@@ -74,11 +83,20 @@ func checkSSHUse(path, src string) []string {
 	if !processFiles[path] {
 		problems = append(problems, processImportsIn(file)...)
 	}
+	// go:linkname reaches any unexported name in the binary, sshCommand too.
+	for _, group := range file.Comments {
+		for _, comment := range group.List {
+			if strings.HasPrefix(comment.Text, "//go:linkname") {
+				problems = append(problems, "uses //go:linkname, which can rewrite "+sshIdent+" from anywhere")
+			}
+		}
+	}
 	starts, more := processStarts(file)
 	problems = append(problems, more...)
 	switch {
 	case path == sshFile:
 		problems = append(problems, checkTheOneStart(file, starts)...)
+		problems = append(problems, rewritesCmd(file)...)
 	case !processFiles[path] && len(starts) > 0:
 		problems = append(problems, "starts a program; only the files in processFiles may")
 	}
@@ -105,10 +123,10 @@ func processImportsIn(file *ast.File) []string {
 
 // processStarts returns every use of a process-starting function, following
 // import aliases — called or not, since a function value is as good as a call
-// — and every exec.Cmd literal.
+// — and every exec.Cmd made otherwise: a literal, new(exec.Cmd), a variable.
 func processStarts(file *ast.File) (uses []ast.Expr, problems []string) {
 	starters := map[string]map[string]bool{} // local package name → function names
-	execName := ""
+	execNames := map[string]bool{}
 	for _, imp := range file.Imports {
 		importPath, _ := strconv.Unquote(imp.Path.Value)
 		funcs, ok := processStarters[importPath]
@@ -123,13 +141,21 @@ func processStarts(file *ast.File) (uses []ast.Expr, problems []string) {
 			problems = append(problems, "dot import of "+importPath+" hides which calls start programs")
 			continue
 		}
-		if importPath == "os/exec" {
-			execName = name
+		if execPackages[importPath] {
+			execNames[name] = true
 		}
 		starters[name] = map[string]bool{}
 		for _, f := range funcs {
 			starters[name][f] = true
 		}
+	}
+	isCmd := func(e ast.Expr) bool {
+		sel, ok := e.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Cmd" {
+			return false
+		}
+		pkg, ok := sel.X.(*ast.Ident)
+		return ok && execNames[pkg.Name]
 	}
 	ast.Inspect(file, func(n ast.Node) bool {
 		switch n := n.(type) {
@@ -138,10 +164,16 @@ func processStarts(file *ast.File) (uses []ast.Expr, problems []string) {
 				uses = append(uses, n)
 			}
 		case *ast.CompositeLit:
-			if sel, ok := n.Type.(*ast.SelectorExpr); ok && execName != "" && sel.Sel.Name == "Cmd" {
-				if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == execName {
-					uses = append(uses, n)
-				}
+			if isCmd(n.Type) {
+				uses = append(uses, n)
+			}
+		case *ast.CallExpr:
+			if fn, ok := n.Fun.(*ast.Ident); ok && fn.Name == "new" && len(n.Args) == 1 && isCmd(n.Args[0]) {
+				uses = append(uses, n)
+			}
+		case *ast.ValueSpec:
+			if isCmd(n.Type) {
+				uses = append(uses, n.Type)
 			}
 		}
 		return true
@@ -199,6 +231,25 @@ func checkTheOneStart(file *ast.File, starts []ast.Expr) []string {
 		return []string{want}
 	}
 	return nil
+}
+
+// rewritesCmd finds assignments to a command's Path or Args, which would
+// replace what the one call runs: cmd.Args = []string{"ssh", "-A"}.
+func rewritesCmd(file *ast.File) []string {
+	var problems []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for _, lhs := range assign.Lhs {
+			if sel, ok := lhs.(*ast.SelectorExpr); ok && cmdFields[sel.Sel.Name] {
+				problems = append(problems, "assigns "+sel.Sel.Name+" after the one call, replacing what it runs")
+			}
+		}
+		return true
+	})
+	return problems
 }
 
 // touchesPinned finds every assignment to a pinned name or its elements,
@@ -452,6 +503,39 @@ func TestSSHGuardCatchesBypasses(t *testing.T) {
 			path: sshFile,
 			src:  goFile("boxsync", exec, theOneStart+"\n\nvar other = &exec.Cmd{Path: \"/bin/sh\"}"),
 			want: []string{"exactly one"},
+		},
+		{
+			name: "execabs, which wraps os/exec",
+			path: "internal/cli/peek.go",
+			src:  goFile("cli", []string{`"golang.org/x/sys/execabs"`}, `var peek = execabs.Command`),
+			want: []string{`imports "golang.org/x/sys/execabs"`},
+		},
+		{
+			name: "linkname reaching the unexported command",
+			path: "internal/cli/peek.go",
+			src: goFile("cli", []string{`_ "unsafe"`},
+				"//go:linkname cmd github.com/magroski/blindfold/internal/boxsync.sshCommand\nvar cmd string"),
+			want: []string{"go:linkname"},
+		},
+		{
+			name: "a Cmd made with new beside the one call",
+			path: sshFile,
+			src:  goFile("boxsync", exec, theOneStart+"\n\nvar other = new(exec.Cmd)"),
+			want: []string{"exactly one"},
+		},
+		{
+			name: "a Cmd declared beside the one call",
+			path: sshFile,
+			src:  goFile("boxsync", exec, theOneStart+"\n\nvar other exec.Cmd"),
+			want: []string{"exactly one"},
+		},
+		{
+			name: "the arguments replaced after the one call",
+			path: sshFile,
+			src: goFile("boxsync", exec, "func dial(ctx context.Context) *exec.Cmd {\n"+
+				"\tcmd := exec.CommandContext(ctx, sshCommand, append(sshArgs(), \"box\")...)\n"+
+				"\tcmd.Args = []string{\"ssh\", \"-A\"}\n\treturn cmd\n}"),
+			want: []string{"assigns Args"},
 		},
 		{
 			name: "a second program in ssh.go",

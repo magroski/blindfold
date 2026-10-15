@@ -80,7 +80,9 @@ Keychain (`kek_darwin.go`, cgo) or the Linux Secret Service over D-Bus
   without `BLINDFOLD_PASSPHRASE`; `ssh_guard_test.go` enforces it, and a new
   file that starts programs must be added to its allowlist by hand. A copy is
   whole — a missing secret is refused, never merged — and may not declare a
-  code-loading variable (`codeLoadingVars` in `internal/boxsync/protocol.go`).
+  variable that runs code or redirects traffic (`hijackingVars` in
+  `internal/boxsync/protocol.go`). A held-open vault calls `Reload` before
+  each operation, so it decides on what is on disk now.
   A box gets 60 seconds to answer each request; an idle session never times
   out, because the picker waits on a person.
 

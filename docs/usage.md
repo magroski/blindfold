@@ -142,9 +142,11 @@ blindfold push linux-box pg-ro --overwrite    # replace an entry that differs
 A credential travels whole — description, tags, every variable — and is sealed
 on arrival under the receiving vault's own master key. `≠` compares secret
 values too, without sending them. Removing an entry is never copied. Each
-entry stored prints its variable names (`stripe  created: STRIPE_KEY`); one
-declaring a variable that makes programs load code, such as `LD_PRELOAD` or
-`GIT_SSH_COMMAND`, is refused — add it by hand where it is meant.
+entry stored prints its variable names (`stripe  created: STRIPE_KEY`); read
+them. One declaring a variable that can make a program run code or send its
+traffic elsewhere — `LD_PRELOAD`, `GIT_SSH_COMMAND`, `PAGER`, `HTTPS_PROXY`
+and the like — is refused; add it by hand where it is meant. That is a list,
+and no list is complete.
 
 ### Setting up a box
 
@@ -168,7 +170,9 @@ every machine: an older one that writes the vault forgets the box list
 Check a box with `ssh <box> blindfold doctor`. When a box fails, `sync` and
 `push` show its own message and change nothing. A box gets 60 seconds to
 answer each request, ssh's own prompts included; one that does not is
-dropped. The picker waiting on you is not a request and never times out.
+dropped — though a push it had received may still be stored once it gets
+there, so check with `sync`. The picker waiting on you is not a request and
+never times out. One push carries up to about 9 MiB of values.
 
 ## Auditing
 

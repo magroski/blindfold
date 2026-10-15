@@ -109,6 +109,13 @@ func withoutPassphrase(environ []string) []string {
 // unresolved, connection refused, authentication — rather than the box's command.
 const sshFailed = 255
 
+// The statuses a POSIX shell exits with when it cannot run the command it was
+// given: not found, or found and not executable.
+const (
+	shellNotFound      = 127
+	shellNotExecutable = 126
+)
+
 // dialError explains a session that never started. A box that hung up before
 // answering most often has no blindfold where a non-interactive ssh session
 // looks.
@@ -121,9 +128,20 @@ func dialError(remote vault.Remote, handshake, exit error) error {
 		return handshake
 	}
 	var exited *exec.ExitError
-	if errors.As(exit, &exited) && exited.ExitCode() == sshFailed {
+	status := -1
+	if errors.As(exit, &exited) {
+		status = exited.ExitCode()
+	}
+	switch status {
+	case sshFailed:
 		return fmt.Errorf("ssh to %s failed; its message is above. Check that `ssh %s` works from here",
 			remote.Destination, remote.Destination)
+	case -1, shellNotFound, shellNotExecutable:
+		// The hint below.
+	default:
+		// blindfold started there and failed; it said why.
+		return fmt.Errorf("`%s %s` on %s failed (%v); its message is above. If the box runs an older "+
+			"blindfold, install the same version on both", remote.Bin, serveCommand, remote.Destination, exit)
 	}
 	reason := "it exited without answering"
 	if exit != nil {

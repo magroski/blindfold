@@ -452,6 +452,39 @@ func TestPickerConfirmsOverwrite(t *testing.T) {
 	}
 }
 
+// One unreachable box does not stop a command naming several: the others
+// still get their copy, and the table is redrawn.
+func TestPickerGoesOnPastAnUnreachableBox(t *testing.T) {
+	h := newHarness(t)
+	world := newSSHWorld(t)
+	mac := world.newBox(t, "mac")
+	h.mustRun(localSecret, "add", "API_KEY")
+	h.mustRun("", "remote", "add", "mac-box", "mac")
+	h.mustRun("", "remote", "add", "old-box", "mac", "--bin", "future")
+
+	v, err := openVault()
+	if err != nil {
+		t.Fatal(err)
+	}
+	remotes, err := findRemotes(v, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	env := lockStderr(Env{Stdout: &stdout, Stderr: &stderr, Version: "test"})
+	view := openSyncView(env, v, remotes)
+	p := &prompter{out: env.Stderr, buf: bufio.NewReader(strings.NewReader("push 1 old-box mac-box\n\n"))}
+	_ = runPicker(env, view, p) // fails: old-box is unreachable, as sync would
+	view.close()
+
+	if got := mac.mustRun("", "get", "API_KEY", "--force"); strings.TrimSpace(got) != localSecret {
+		t.Errorf("mac-box holds %q after a push past an unreachable box:\n%s", got, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), syncLegend) {
+		t.Errorf("the table was not redrawn:\n%s", stdout.String())
+	}
+}
+
 // The picker's errors carry box text escaped, like everything else from a box.
 func TestPickerEscapesBoxErrors(t *testing.T) {
 	h := newHarness(t)

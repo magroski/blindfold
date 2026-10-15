@@ -60,6 +60,11 @@ func Open(dir string) (*Vault, error) {
 	return v, nil
 }
 
+// Reload re-reads vault.json. A process that holds a vault open — the sync
+// picker, a box's sync-serve — calls it before each operation, so it decides
+// on what is there now, not on what was there when it started.
+func (v *Vault) Reload() error { return v.loadMetadata() }
+
 // loadMetadata reads vault.json, if there is one, over v's metadata.
 func (v *Vault) loadMetadata() error {
 	data, err := os.ReadFile(filepath.Join(v.dir, MetadataFile))

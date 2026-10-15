@@ -185,8 +185,12 @@ func (c *Channel) Send(v any) error {
 		return err
 	}
 	frame := c.send.Seal(nonce, nonce, plaintext, sequenceAAD(c.sendSeq))
+	line := base64.StdEncoding.EncodeToString(frame) + "\n"
+	if len(line) > maxFrameSize {
+		return errTooLargeToSend
+	}
 	c.sendSeq++
-	_, err = io.WriteString(c.w, base64.StdEncoding.EncodeToString(frame)+"\n")
+	_, err = io.WriteString(c.w, line)
 	return err
 }
 
@@ -195,6 +199,11 @@ func (c *Channel) Send(v any) error {
 var errFrame = errors.New("sync: a frame failed to authenticate; the session was altered in transit")
 
 var errFrameTooLarge = fmt.Errorf("sync: a frame is larger than %d bytes; the session was ended", maxFrameSize)
+
+// errTooLargeToSend refuses a message the other end would refuse, before any
+// of it is written. Values are base64 twice over, so ~9 MiB of them fill one.
+var errTooLargeToSend = fmt.Errorf("sync: this request is over %d bytes once encoded; send fewer or smaller entries",
+	maxFrameSize)
 
 // Receive opens the next message into v. A frame that will not open ends the
 // session: every later Send and Receive returns the same error.

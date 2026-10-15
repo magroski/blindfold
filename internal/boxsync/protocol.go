@@ -65,20 +65,35 @@ func (o Outcome) valid() bool {
 	return false
 }
 
-// codeLoadingVars make a program load or run code of the variable's choosing.
-// A copied entry may not declare one: a box could otherwise turn a credential
-// into code run by the next `exec` here, and this machine could do the same
-// to a box. Names ending in "_" are prefixes. Add one locally to use it.
-var codeLoadingVars = []string{
-	"LD_", "DYLD_", "PATH", "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "PROMPT_COMMAND", "PS4", "ZDOTDIR",
-	"NODE_OPTIONS", "NODE_PATH", "PYTHONSTARTUP", "PYTHONPATH", "PYTHONHOME", "PERL5OPT", "PERL5LIB", "PERLLIB",
-	"RUBYOPT", "RUBYLIB", "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS", "CLASSPATH",
-	"GIT_SSH", "GIT_SSH_COMMAND", "GIT_EXEC_PATH", "GIT_ASKPASS", "GIT_CONFIG_", "SSH_ASKPASS", "GCONV_PATH",
+// hijackingVars make a program run code of the variable's choosing, or send
+// its traffic, or trust, somewhere else. A copied entry may not declare one:
+// a box could otherwise turn a credential into code run by the next `exec`
+// here — or redirect the entries loaded beside it — and this machine could do
+// the same to a box. Matched ignoring case; names ending in "_" are prefixes.
+// It is a list, so it cannot be complete: each stored entry prints its
+// variables for a person to read. Add one by hand where it is meant.
+var hijackingVars = []string{
+	// Loaders and interpreter options.
+	"LD_", "DYLD_", "GCONV_PATH", "PATH", "BASH_ENV", "ENV", "SHELL", "SHELLOPTS", "BASHOPTS", "IFS", "CDPATH",
+	"PROMPT_COMMAND", "PS4", "ZDOTDIR", "NODE_OPTIONS", "NODE_PATH", "NPM_CONFIG_", "PYTHONSTARTUP",
+	"PYTHONPATH", "PYTHONHOME", "PYTHONWARNINGS", "PERL5OPT", "PERL5LIB", "PERLLIB", "PERL5DB", "RUBYOPT",
+	"RUBYLIB", "LUA_INIT", "LUA_INIT_", "PHPRC", "PHP_INI_SCAN_DIR", "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS",
+	"JDK_JAVA_OPTIONS", "JAVA_OPTS", "MAVEN_OPTS", "GRADLE_OPTS", "CLASSPATH", "DOTNET_STARTUP_HOOKS",
+	"GOFLAGS", "CC", "CXX", "RUSTC", "RUSTC_WRAPPER", "CARGO_BUILD_",
+	// Commands run straight from a value.
+	"PAGER", "MANPAGER", "SYSTEMD_PAGER", "LESSOPEN", "LESSCLOSE", "EDITOR", "VISUAL", "BROWSER",
+	"SSH_ASKPASS", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_ASKPASS", "GIT_EXEC_PATH", "GIT_EXTERNAL_DIFF",
+	"GIT_PAGER", "GIT_EDITOR", "GIT_SEQUENCE_EDITOR", "GIT_PROXY_COMMAND", "GIT_DIR", "GIT_WORK_TREE",
+	"GIT_TEMPLATE_DIR", "GIT_CONFIG", "GIT_CONFIG_",
+	// Traffic and trust sent elsewhere.
+	"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "FTP_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR",
+	"CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS", "GIT_SSL_CAINFO",
 }
 
-// loadsCode reports whether name is, or starts with, one of codeLoadingVars.
-func loadsCode(name string) bool {
-	for _, v := range codeLoadingVars {
+// hijacks reports whether name is, or starts with, one of hijackingVars.
+func hijacks(name string) bool {
+	name = strings.ToUpper(name)
+	for _, v := range hijackingVars {
 		if name == v || (strings.HasSuffix(v, "_") && strings.HasPrefix(name, v)) {
 			return true
 		}
@@ -197,13 +212,13 @@ func store(v *vault.Vault, ch *Channel, c Credential, overwrite bool) Result {
 //
 // Put keeps a sealed value the call leaves out, so a copy missing one would
 // merge: the receiver's secret under the sender's endpoint. A copy declaring
-// a code-loading variable is refused outright. Errors name variables, never
-// values.
+// a variable from hijackingVars is refused outright. Errors name variables,
+// never values.
 func whole(c Credential) (map[string]string, error) {
 	for _, variable := range c.Entry.VarNames() {
-		if loadsCode(variable) {
-			return nil, fmt.Errorf("it declares %s, which makes programs load code; "+
-				"a copy may not carry one. Add it by hand on the machine that needs it", variable)
+		if hijacks(variable) {
+			return nil, fmt.Errorf("it declares %s, which can make a program run code or send its traffic "+
+				"elsewhere; a copy may not carry one. Add it by hand on the machine that needs it", variable)
 		}
 	}
 	values := make(map[string]string, len(c.Values))

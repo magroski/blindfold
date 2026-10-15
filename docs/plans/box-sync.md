@@ -285,3 +285,19 @@ Rejected:
 - Q: an older binary drops the box list. A: document it (user).
 - Deferred: one unsealable entry marks a whole box unreachable; no size limit
   below the 16 MiB frame for a single value.
+- PR re-review (adversarial, 2026-10-15; the security re-review was halted by
+  a safety classifier before it reported). Fixed, tests first: `Put`
+  re-reading vault.json was not enough — the conflict check and `Unseal`
+  still used what a held-open process read at start, so an entry added
+  meanwhile was replaced without asking, and one edited meanwhile looked
+  tampered with. Sessions now call `Vault.Reload` before each operation, on
+  both sides. Also: the variable list grew to commands run from a value,
+  proxies and CA bundles, matched in any case, and the docs say a list cannot
+  be complete; a request too large to send is refused before writing, and
+  the session goes on; a push on an ended session counts as not sent; a box
+  whose blindfold starts and fails is pointed at its own message; a picker
+  command naming several boxes goes on past an unreachable one; the guard
+  catches execabs, go:linkname, `new(exec.Cmd)`, `var c exec.Cmd` and
+  `cmd.Args =`. A timed-out push may still land on the box: documented.
+- Deferred: closing boxes one after another (up to 10 s each when ssh ignores
+  SIGTERM); a vault write lock (decision pending).
