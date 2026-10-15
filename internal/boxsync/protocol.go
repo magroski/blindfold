@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"encoding/json"
 	"fmt"
+	"path"
 	"strings"
 	"time"
 
@@ -65,36 +66,58 @@ func (o Outcome) valid() bool {
 	return false
 }
 
-// hijackingVars make a program run code of the variable's choosing, or send
-// its traffic, or trust, somewhere else. A copied entry may not declare one:
-// a box could otherwise turn a credential into code run by the next `exec`
-// here — or redirect the entries loaded beside it — and this machine could do
-// the same to a box. Matched ignoring case; names ending in "_" are prefixes.
-// It is a list, so it cannot be complete: each stored entry prints its
-// variables for a person to read. Add one by hand where it is meant.
+// hijackingVars make a program run code of the variable's choosing, load its
+// configuration or libraries from elsewhere, stop checking whom it talks to,
+// or send its traffic elsewhere. A copied entry may not declare one: a box
+// could otherwise turn a credential into code run by the next `exec` here —
+// or redirect the entries loaded beside it — and this machine could do the
+// same to a box. Endpoints and registries (OPENAI_BASE_URL, PIP_INDEX_URL,
+// PGHOST) are not here: they are often the credential itself.
+//
+// Patterns, matched against the name in upper case: "LD_*" is every LD_
+// variable. It is a list, so it cannot be complete; each stored entry prints
+// its variables for a person to read. Add one by hand where it is meant.
 var hijackingVars = []string{
-	// Loaders and interpreter options.
-	"LD_", "DYLD_", "GCONV_PATH", "PATH", "BASH_ENV", "ENV", "SHELL", "SHELLOPTS", "BASHOPTS", "IFS", "CDPATH",
-	"PROMPT_COMMAND", "PS4", "ZDOTDIR", "NODE_OPTIONS", "NODE_PATH", "NPM_CONFIG_", "PYTHONSTARTUP",
-	"PYTHONPATH", "PYTHONHOME", "PYTHONWARNINGS", "PERL5OPT", "PERL5LIB", "PERLLIB", "PERL5DB", "RUBYOPT",
-	"RUBYLIB", "LUA_INIT", "LUA_INIT_", "PHPRC", "PHP_INI_SCAN_DIR", "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS",
-	"JDK_JAVA_OPTIONS", "JAVA_OPTS", "MAVEN_OPTS", "GRADLE_OPTS", "CLASSPATH", "DOTNET_STARTUP_HOOKS",
-	"GOFLAGS", "CC", "CXX", "RUSTC", "RUSTC_WRAPPER", "CARGO_BUILD_",
+	// Loaders, interpreter and compiler options.
+	"LD_*", "DYLD_*", "GCONV_PATH", "PATH", "BASH_ENV", "ENV", "SHELL", "SHELLOPTS", "BASHOPTS", "IFS",
+	"CDPATH", "FPATH", "PROMPT_COMMAND", "PS4", "ZDOTDIR", "NODE_OPTIONS", "NODE_PATH",
+	"NODE_REPL_EXTERNAL_MODULE", "NPM_CONFIG_*", "YARN_YARN_PATH", "PYTHONSTARTUP", "PYTHONPATH",
+	"PYTHONHOME", "PYTHONUSERBASE", "PYTHONWARNINGS", "PERL5OPT", "PERL5LIB", "PERLLIB", "PERL5DB", "RUBYOPT",
+	"RUBYLIB", "GEM_HOME", "GEM_PATH", "BUNDLE_GEMFILE", "RUBYGEMS_GEMDEPS", "LUA_INIT*", "LUA_PATH*",
+	"LUA_CPATH*", "PHPRC", "PHP_INI_SCAN_DIR", "R_PROFILE*", "R_ENVIRON*", "JAVA_HOME", "JAVA_TOOL_OPTIONS",
+	"_JAVA_OPTIONS", "JDK_JAVA_OPTIONS", "JAVA_OPTS", "MAVEN_OPTS", "GRADLE_OPTS", "GRADLE_USER_HOME",
+	"CLASSPATH", "DOTNET_STARTUP_HOOKS", "DOTNET_ADDITIONAL_DEPS", "CORECLR_*", "COR_PROFILER*",
+	"ERL_FLAGS", "ERL_AFLAGS", "ERL_ZFLAGS", "ELIXIR_ERL_OPTIONS", "GOFLAGS", "GOENV", "GOCACHEPROG",
+	"GOAUTH", "CGO_*FLAGS", "CC", "CXX", "CFLAGS", "CPPFLAGS", "CXXFLAGS", "LDFLAGS", "MAKEFLAGS", "MAKEFILES",
+	"CMAKE_*_COMPILER_LAUNCHER", "CCACHE_PREFIX", "RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER",
+	"RUSTDOC", "RUSTFLAGS", "RUSTDOCFLAGS", "CARGO_HOME", "CARGO_BUILD_*", "CARGO_TARGET_*_RUNNER",
+	"CARGO_TARGET_*_LINKER", "GTK_MODULES", "GTK_PATH", "QT_PLUGIN_PATH", "CLOUDSDK_PYTHON",
 	// Commands run straight from a value.
-	"PAGER", "MANPAGER", "SYSTEMD_PAGER", "LESSOPEN", "LESSCLOSE", "EDITOR", "VISUAL", "BROWSER",
-	"SSH_ASKPASS", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_ASKPASS", "GIT_EXEC_PATH", "GIT_EXTERNAL_DIFF",
-	"GIT_PAGER", "GIT_EDITOR", "GIT_SEQUENCE_EDITOR", "GIT_PROXY_COMMAND", "GIT_DIR", "GIT_WORK_TREE",
-	"GIT_TEMPLATE_DIR", "GIT_CONFIG", "GIT_CONFIG_",
-	// Traffic and trust sent elsewhere.
-	"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "FTP_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR",
-	"CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS", "GIT_SSL_CAINFO",
+	"PAGER", "MANPAGER", "MANOPT", "SYSTEMD_PAGER", "LESSOPEN", "LESSCLOSE", "EDITOR", "VISUAL", "FCEDIT",
+	"BROWSER", "SUDO_ASKPASS", "SUDO_EDITOR", "SSH_ASKPASS", "KUBE_EDITOR", "PSQL_PAGER", "PSQL_EDITOR",
+	"GH_PAGER", "GH_EDITOR", "GH_BROWSER", "HGEDITOR", "TAR_OPTIONS", "RSYNC_RSH", "RSYNC_CONNECT_PROG",
+	"SVN_SSH", "CVS_RSH", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_ASKPASS", "GIT_EXEC_PATH", "GIT_EXTERNAL_DIFF",
+	"GIT_PAGER", "GIT_EDITOR", "GIT_SEQUENCE_EDITOR", "GIT_PROXY_COMMAND",
+	// Configuration read from elsewhere: every tool's dotfiles, plugins, helpers.
+	"HOME", "XDG_CONFIG_HOME", "XDG_CONFIG_DIRS", "XDG_DATA_HOME", "XDG_DATA_DIRS", "GIT_DIR",
+	"GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_TEMPLATE_DIR", "GIT_CONFIG", "GIT_CONFIG_*", "GNUPGHOME",
+	"KUBECONFIG", "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE", "DOCKER_CONFIG", "TF_CLI_CONFIG_FILE",
+	"HELM_PLUGINS", "PSQLRC", "HGRCPATH", "OPENSSL_CONF", "OPENSSL_ENGINES", "OPENSSL_MODULES",
+	// Checks turned off, trust or traffic sent elsewhere, traffic logged.
+	"NODE_TLS_REJECT_UNAUTHORIZED", "GIT_SSL_NO_VERIFY", "PYTHONHTTPSVERIFY", "VAULT_SKIP_VERIFY",
+	"PIP_TRUSTED_HOST", "GOSUMDB", "GONOSUMDB", "GOINSECURE", "SSL_CERT_FILE", "SSL_CERT_DIR",
+	"CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS", "GIT_SSL_CAINFO", "GIT_SSL_CAPATH",
+	"AWS_CA_BUNDLE", "PIP_CERT", "CARGO_HTTP_CAINFO", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "FTP_PROXY",
+	"GRPC_PROXY", "RSYNC_PROXY", "CARGO_HTTP_PROXY", "HOSTALIASES", "LOCALDOMAIN", "RES_OPTIONS",
+	"SSLKEYLOGFILE", "GIT_TRACE*",
 }
 
-// hijacks reports whether name is, or starts with, one of hijackingVars.
+// hijacks reports whether name matches one of hijackingVars.
 func hijacks(name string) bool {
 	name = strings.ToUpper(name)
-	for _, v := range hijackingVars {
-		if name == v || (strings.HasSuffix(v, "_") && strings.HasPrefix(name, v)) {
+	for _, pattern := range hijackingVars {
+		if matched, _ := path.Match(pattern, name); matched {
 			return true
 		}
 	}

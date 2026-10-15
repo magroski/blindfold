@@ -2,6 +2,7 @@ package vault
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,6 +54,11 @@ func TestAddRemoteValidates(t *testing.T) {
 	if err := v.AddRemote(Remote{Name: "home-bin", Destination: "host", Bin: "~/go/bin/blindfold"}); err != nil {
 		t.Errorf("a home-relative bin was refused: %v", err)
 	}
+	for i, dest := range []string{"me@dev-box.local", "ssh://me@[fe80::1%25en0]:2222", "192.0.2.7", "alias_2"} {
+		if err := v.AddRemote(Remote{Name: fmt.Sprintf("ok%d", i), Destination: dest}); err != nil {
+			t.Errorf("destination %q was refused: %v", dest, err)
+		}
+	}
 	for _, r := range []Remote{
 		{Name: "box", Destination: "other"},                        // duplicate name
 		{Name: "-box", Destination: "host"},                        // name reads as a flag
@@ -63,6 +69,10 @@ func TestAddRemoteValidates(t *testing.T) {
 		{Name: "b6", Destination: "host", Bin: "$(id)/blindfold"},  // shell syntax
 		{Name: "b7", Destination: "host", Bin: "/opt/my tools/bf"}, // a word break
 		{Name: "b8", Destination: "host", Bin: "-x"},               // reads as an option
+		// A ProxyCommand's %h hands the destination to a shell.
+		{Name: "b9", Destination: "box;touch$IFS/tmp/x"},
+		{Name: "b10", Destination: "$(id)@box"},
+		{Name: "b11", Destination: "box`id`"},
 	} {
 		if err := v.AddRemote(r); err == nil {
 			t.Errorf("AddRemote(%+v) accepted", r)

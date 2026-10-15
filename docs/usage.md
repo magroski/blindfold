@@ -143,10 +143,12 @@ A credential travels whole — description, tags, every variable — and is seal
 on arrival under the receiving vault's own master key. `≠` compares secret
 values too, without sending them. Removing an entry is never copied. Each
 entry stored prints its variable names (`stripe  created: STRIPE_KEY`); read
-them. One declaring a variable that can make a program run code or send its
-traffic elsewhere — `LD_PRELOAD`, `GIT_SSH_COMMAND`, `PAGER`, `HTTPS_PROXY`
-and the like — is refused; add it by hand where it is meant. That is a list,
-and no list is complete.
+them. One declaring a variable that can make a program run code, load its
+configuration from elsewhere, skip certificate checks or send its traffic
+elsewhere — `LD_PRELOAD`, `GIT_SSH_COMMAND`, `MAKEFLAGS`, `HOME`,
+`HTTPS_PROXY` and the like — is refused; add it by hand where it is meant.
+Endpoints such as `OPENAI_BASE_URL` travel. That is a list, and no list is
+complete.
 
 ### Setting up a box
 
@@ -162,9 +164,9 @@ terminal does:
   `security unlock-keychain`, or use a key or passphrase file.
 
 A box set up this way opens its vault to anything that can ssh in as you,
-an agent included: keep `ssh` in the `ask` list (see
-[security](security.md#between-dev-boxes)). Install the same blindfold on
-every machine: an older one that writes the vault forgets the box list
+an agent included: keep `ssh`, `scp`, `sftp` and `rsync` in the `ask` list
+(see [security](security.md#between-dev-boxes)). Install the same blindfold
+on every machine: an older one that writes the vault forgets the box list
 (`remote add` again; no credential is lost).
 
 Check a box with `ssh <box> blindfold doctor`. When a box fails, `sync` and

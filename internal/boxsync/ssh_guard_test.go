@@ -8,6 +8,7 @@ import (
 	"os"
 	pathpkg "path"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -20,9 +21,11 @@ import (
 // plaintext past both, and no runtime test would notice it. Parsing, not
 // grepping, so an import alias cannot hide a call.
 //
-// The guard is a tripwire, not a proof. Inside the files allowed to start
-// programs, `sh -c "ssh …"` or a name built at run time still gets past it;
-// those files are few, and each change to them is read by a person.
+// The guard is a tripwire, not a proof. A program name built at run time in
+// the files allowed to start programs, non-Go sources, and dependencies all
+// get past it; those files are few, and each change to them is read by a
+// person. The contents of sshArgs() and the remote command are pinned by
+// TestDialRunsServeOverSSH, which checks ssh's whole argv.
 
 const (
 	sshFile      = "internal/boxsync/ssh.go" // the one file allowed to start ssh
@@ -55,6 +58,14 @@ var execPackages = map[string]bool{"os/exec": true, "golang.org/x/sys/execabs": 
 
 // cmdFields, assigned after the one call, would replace what it runs.
 var cmdFields = map[string]bool{"Path": true, "Args": true}
+
+// execHelpers are how `blindfold exec` starts its command; named outside the
+// files that start programs, they are a new call site.
+var execHelpers = map[string]bool{"execProcess": true, "replaceProcess": true}
+
+// sshWord finds an ssh program named inside a longer string: a shell command
+// line such as "sh -c 'ssh box …'", in a file that may start programs.
+var sshWord = regexp.MustCompile(`(^|[^A-Za-z0-9_.-])(ssh|scp|sftp)([^A-Za-z0-9_.-]|$)`)
 
 // processStarters are the functions, by import path, that run another program.
 // An exec.Cmd literal counts too: it runs whatever Path it is given.
@@ -101,7 +112,10 @@ func checkSSHUse(path, src string) []string {
 		problems = append(problems, "starts a program; only the files in processFiles may")
 	}
 	if path != sshFile {
-		problems = append(problems, sshLiterals(file)...)
+		problems = append(problems, sshLiterals(file, processFiles[path])...)
+	}
+	if !processFiles[path] {
+		problems = append(problems, execHelpersIn(file)...)
 	}
 	// The pinned names are unexported: only this package can reach them.
 	if pathpkg.Dir(path) == pathpkg.Dir(sshFile) {
@@ -181,16 +195,30 @@ func processStarts(file *ast.File) (uses []ast.Expr, problems []string) {
 	return uses, problems
 }
 
+// execHelpersIn reports each use of a helper that starts a program.
+func execHelpersIn(file *ast.File) []string {
+	var problems []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok && execHelpers[id.Name] {
+			problems = append(problems, "uses "+id.Name+", which starts a program; only the files in processFiles may")
+		}
+		return true
+	})
+	return problems
+}
+
 // sshLiterals finds strings naming an ssh program, e.g. "ssh", "/usr/bin/scp",
-// or the import path of an ssh client of its own.
-func sshLiterals(file *ast.File) []string {
+// or the import path of an ssh client of its own. In a file that starts
+// programs, a word inside a longer string counts too: "sh -c 'ssh box …'".
+func sshLiterals(file *ast.File, startsPrograms bool) []string {
 	var problems []string
 	ast.Inspect(file, func(n ast.Node) bool {
 		lit, ok := n.(*ast.BasicLit)
 		if !ok || lit.Kind != token.STRING {
 			return true
 		}
-		if value, err := strconv.Unquote(lit.Value); err == nil && sshBinaries[pathpkg.Base(value)] {
+		value, err := strconv.Unquote(lit.Value)
+		if err == nil && (sshBinaries[pathpkg.Base(value)] || (startsPrograms && sshWord.MatchString(value))) {
 			problems = append(problems, fmt.Sprintf("names ssh (%s); only %s may run it", lit.Value, sshFile))
 		}
 		return true
@@ -243,6 +271,9 @@ func rewritesCmd(file *ast.File) []string {
 			return true
 		}
 		for _, lhs := range assign.Lhs {
+			if index, ok := lhs.(*ast.IndexExpr); ok {
+				lhs = index.X // cmd.Args[1] = "-A" rewrites Args too
+			}
 			if sel, ok := lhs.(*ast.SelectorExpr); ok && cmdFields[sel.Sel.Name] {
 				problems = append(problems, "assigns "+sel.Sel.Name+" after the one call, replacing what it runs")
 			}
@@ -536,6 +567,26 @@ func TestSSHGuardCatchesBypasses(t *testing.T) {
 				"\tcmd := exec.CommandContext(ctx, sshCommand, append(sshArgs(), \"box\")...)\n"+
 				"\tcmd.Args = []string{\"ssh\", \"-A\"}\n\treturn cmd\n}"),
 			want: []string{"assigns Args"},
+		},
+		{
+			name: "one argument replaced after the one call",
+			path: sshFile,
+			src: goFile("boxsync", exec, "func dial(ctx context.Context) *exec.Cmd {\n"+
+				"\tcmd := exec.CommandContext(ctx, sshCommand, append(sshArgs(), \"box\")...)\n"+
+				"\tcmd.Args[1] = \"-A\"\n\treturn cmd\n}"),
+			want: []string{"assigns Args"},
+		},
+		{
+			name: "the exec helpers called from another file",
+			path: "internal/cli/peek.go",
+			src:  goFile("cli", nil, `func peek() { execProcess("/usr/bin/"+"s"+"sh", nil, nil) }`),
+			want: []string{"execProcess"},
+		},
+		{
+			name: "ssh inside a shell command, in an allowed file",
+			path: "internal/cli/exec.go",
+			src:  goFile("cli", exec, `func peek() { exec.Command("sh", "-c", "ssh box blindfold get X") }`),
+			want: []string{"ssh box blindfold get X"},
 		},
 		{
 			name: "a second program in ssh.go",

@@ -49,6 +49,11 @@ func (r Remote) validate() error {
 	if strings.IndexFunc(r.Destination, isSpaceOrControl) >= 0 {
 		return errors.New("vault: an ssh destination may not contain spaces or control characters")
 	}
+	// A ProxyCommand's %h hands the destination to a shell; "box;touch x"
+	// would run there.
+	if strings.IndexFunc(r.Destination, isUnsafeInDestination) >= 0 {
+		return errors.New("vault: an ssh destination may hold only letters, digits and . _ - @ : / [ ] % +")
+	}
 	// The bin reaches the box's login shell — sh, zsh or fish — unquoted, so
 	// it is held to characters every one of them reads literally, plus a
 	// leading ~ they all expand: ~/go/bin/blindfold, /opt/bin/blindfold.
@@ -65,6 +70,14 @@ func isUnsafeInBin(r rune) bool {
 }
 
 func isSpaceOrControl(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }
+
+// isUnsafeInDestination is anything a shell reads as syntax. What is left
+// still spells every destination ssh takes: alias, user@host, ssh://h:22,
+// [fe80::1%en0].
+func isUnsafeInDestination(r rune) bool {
+	safe := r < unicode.MaxASCII && (unicode.IsLetter(r) || unicode.IsDigit(r) || strings.ContainsRune("._-@:/[]%+", r))
+	return !safe
+}
 
 // Remotes lists the registered boxes, sorted by name. It needs the master key:
 // the registry is sealed.

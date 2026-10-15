@@ -125,7 +125,7 @@ In `~/.claude/settings.json`, or per project in `.claude/settings.json`:
       "Bash(blindfold remove:*)", "Bash(blindfold import:*)", "Bash(blindfold init:*)",
       "Bash(blindfold remote:*)", "Bash(blindfold sync:*)", "Bash(blindfold push:*)",
       "Bash(blindfold pull:*)", "Bash(blindfold sync-serve:*)",
-      "Bash(ssh:*)"
+      "Bash(ssh:*)", "Bash(scp:*)", "Bash(sftp:*)", "Bash(rsync:*)"
     ]
   }
 }
@@ -141,4 +141,7 @@ Prefix rules match how a command starts. A wrapper — `sh -c '…'`, `env -u X 
 `Bash(sh:*)` out of `allow` too. `ssh` is the wrapper that matters once you
 sync: a box set up for it opens its vault to any ssh session, so
 `ssh box blindfold get NAME --force` prints a value, and no `blindfold` rule
-sees it. `Bash(ssh:*)` above makes every ssh an agent runs a deliberate act.
+sees it. The rules above make every command that starts with `ssh`, `scp`,
+`sftp` or `rsync` a deliberate act; one that reaches ssh another way
+(`/usr/bin/ssh`, `git -c core.sshCommand=…`) starts differently and is not
+caught.

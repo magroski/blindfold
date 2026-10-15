@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -398,13 +399,28 @@ func TestCopiesRefuseHijackingVariables(t *testing.T) {
 		t.Error("an entry declaring GIT_SSH_COMMAND was stored")
 	}
 
-	// Commands run straight from a value, lowercase names, traffic redirected.
-	for _, variable := range []string{"GIT_EXTERNAL_DIFF", "PAGER", "npm_config_script_shell", "HTTPS_PROXY"} {
+	// Commands run from a value, config or libraries loaded from a path, TLS
+	// turned off, traffic redirected; in any case, with or without a wildcard.
+	for _, variable := range []string{
+		"GIT_EXTERNAL_DIFF", "PAGER", "npm_config_script_shell", "HTTPS_PROXY", "MAKEFLAGS", "KUBECONFIG",
+		"HOME", "NODE_TLS_REJECT_UNAUTHORIZED", "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER", "GIT_TRACE_CURL",
+	} {
 		session := liar(t, response{Entries: []Credential{{Entry: vault.Entry{
 			Name: "gadget", Vars: []vault.Var{{Name: variable, Value: "touch /tmp/pwned"}},
 		}}}})
 		if pulled, err := session.Pull(local, []string{"gadget"}, false); err != nil || pulled[0].Outcome != Failed {
 			t.Errorf("a copy declaring %s = %+v, %v; want a failure", variable, pulled, err)
+		}
+	}
+
+	// Endpoints and registries travel: they are often the credential itself.
+	for _, variable := range []string{"OPENAI_BASE_URL", "PIP_INDEX_URL", "PGHOST", "VAULT_ADDR"} {
+		session := liar(t, response{Entries: []Credential{{Entry: vault.Entry{
+			Name: "endpoint", Vars: []vault.Var{{Name: variable, Value: "https://box.example"}},
+		}}}})
+		pulled, err := session.Pull(local, []string{"endpoint"}, true)
+		if err != nil || pulled[0].Outcome == Failed {
+			t.Errorf("a copy declaring %s = %+v, %v; want it stored", variable, pulled, err)
 		}
 	}
 
@@ -535,6 +551,26 @@ func TestOversizedPushIsNotSent(t *testing.T) {
 	}
 	if _, err := session.Status(local); err != nil {
 		t.Errorf("the session ended: %v", err)
+	}
+}
+
+// A box whose vault will not load still audits what it was sent: the values
+// arrived, stored or not.
+func TestBoxAuditsAPushItCouldNotStore(t *testing.T) {
+	local, box := newVault(t), newVault(t)
+	put(t, local, bundle(), map[string]string{"ES_API_KEY": apiKey, "ES_TOKEN": apiToken})
+	session, _, log := connectTo(t, box)
+	if err := os.WriteFile(filepath.Join(box.Dir(), vault.MetadataFile), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := session.Push(local, []string{"cdp-es"}, false); err == nil {
+		t.Fatal("a box whose vault.json is corrupt stored a push")
+	}
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	if len(log.events) != 1 || log.events[0].Entry != "cdp-es" || log.events[0].Outcome != Failed {
+		t.Errorf("box audit = %+v, want the push it could not store", log.events)
 	}
 }
 

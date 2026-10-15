@@ -37,6 +37,10 @@ func Serve(v *vault.Vault, r io.Reader, w io.Writer, version string, observe fun
 func handle(v *vault.Vault, ch *Channel, req request, observe func(Access)) response {
 	// The session may be long; other processes may have changed the vault.
 	if err := v.Reload(); err != nil {
+		// A push arrived all the same: its values are here, unstored.
+		for _, c := range req.Entries {
+			observe(Access{Op: OpPush, Entry: c.Entry.Name, Vars: c.Entry.VarNames(), Outcome: Failed})
+		}
 		return response{Error: err.Error()}
 	}
 	if !v.Exists() {

@@ -67,8 +67,9 @@ Keychain (`kek_darwin.go`, cgo) or the Linux Secret Service over D-Bus
   that change the vault — `add`, `edit`, `rm`, `import`, `init` — go in `ask`
   beside `env`, `get` and `export`: `edit --var` can repoint a public endpoint,
   and the secret beside it would follow. So do `remote`, `sync`, `push`, `pull`
-  and `sync-serve`: they copy credentials to other machines. So does `ssh`
-  itself: a box set up for sync opens its vault to any ssh session.
+  and `sync-serve`: they copy credentials to other machines. So do `ssh`,
+  `scp`, `sftp` and `rsync`: a box set up for sync opens its vault to any ssh
+  session.
 - **Values cross between boxes only inside the encrypted channel.**
   `internal/boxsync` runs the system `ssh` and, inside it, its own X25519 +
   XChaCha20-Poly1305 session, so `sync-serve`'s stdout is never plaintext.

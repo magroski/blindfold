@@ -301,3 +301,14 @@ Rejected:
   `cmd.Args =`. A timed-out push may still land on the box: documented.
 - Deferred: closing boxes one after another (up to 10 s each when ssh ignores
   SIGTERM); a vault write lock (decision pending).
+- Narrow security review of de22369 (verify-only, 2026-10-15): no high
+  findings. Fixed, tests first: the variable list now holds patterns and
+  covers compiler and build options, commands run from a value, config and
+  plugin paths (HOME, KUBECONFIG, …), certificate checks turned off, and
+  traffic logging; endpoints and registries stay allowed (user), since they
+  are often the credential. A box whose vault will not load audits a push it
+  received. Destinations are held to characters no shell reads as syntax (a
+  ProxyCommand's %h hands them to one). The guard catches element writes to
+  `cmd.Args`, the exec helpers named outside their files, and ssh inside a
+  command line in those files. `scp`, `sftp` and `rsync` join `ssh` in the
+  ask rules; docs say the inner channel stops reading, not asking.
