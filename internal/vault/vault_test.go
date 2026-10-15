@@ -56,6 +56,46 @@ func TestPutAndUnsealRoundTrip(t *testing.T) {
 	}
 }
 
+// A long-lived process — the sync picker, a box's sync-serve — must not write
+// the vault.json it read at start over what another process changed since.
+func TestPutKeepsChangesMadeByAnotherProcess(t *testing.T) {
+	longLived := newTestVault(t)
+	if err := longLived.Put(sampleEntry(), map[string]string{"ES_API_KEY": "k1"}); err != nil {
+		t.Fatal(err)
+	}
+
+	other, err := Open(longLived.Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := sampleEntry()
+	edited.Description = "edited elsewhere"
+	if err := other.Put(edited, nil); err != nil {
+		t.Fatal(err)
+	}
+	added := Entry{Name: "added-elsewhere", Vars: []Var{{Name: "TOKEN", Secret: true}}}
+	if err := other.Put(added, map[string]string{"TOKEN": "t"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := longLived.Put(Entry{Name: "mine", Vars: []Var{{Name: "URL", Value: "https://x"}}}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(longLived.Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e, _ := reopened.Get("cdp-es"); e == nil || e.Description != "edited elsewhere" {
+		t.Errorf("an edit made elsewhere was reverted: %+v", e)
+	}
+	for _, name := range []string{"cdp-es", "added-elsewhere", "mine"} {
+		if _, err := reopened.Unseal(name); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
 // The whole point of splitting metadata from sealed values is that discovery
 // works with no key at all. If this breaks, `ls` starts prompting.
 func TestMetadataReadableWithoutMasterKey(t *testing.T) {

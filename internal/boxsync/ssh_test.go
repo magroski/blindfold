@@ -15,10 +15,12 @@ import (
 )
 
 // serveHelperEnv marks a re-run of this test binary as the box's server;
-// hangHelperEnv makes that server go silent after the handshake.
+// hangHelperEnv makes that server go silent after the handshake, and
+// lingerHelperEnv keeps it running after the session ends.
 const (
-	serveHelperEnv = "BOXSYNC_SERVE_HELPER"
-	hangHelperEnv  = "BOXSYNC_SERVE_HANG"
+	serveHelperEnv  = "BOXSYNC_SERVE_HELPER"
+	hangHelperEnv   = "BOXSYNC_SERVE_HANG"
+	lingerHelperEnv = "BOXSYNC_SERVE_LINGER"
 )
 
 // fakeSSH swaps ssh for a script that records its arguments and then runs
@@ -144,6 +146,65 @@ func TestCallGivesUpOnAHungBox(t *testing.T) {
 	if _, err := session.Push(local, []string{"cdp-es"}, false); !errors.Is(err, errTimeout) {
 		t.Errorf("Push = %v, want a timeout", err)
 	}
+	// The session is over: later calls say why, not "file already closed".
+	if _, err := session.Status(local); !errors.Is(err, errTimeout) {
+		t.Errorf("Status after a timeout = %v, want the timeout again", err)
+	}
+}
+
+// shortStop gives a lingering ssh only a moment to exit, for one test.
+func shortStop(t *testing.T) {
+	original := stopDelay
+	stopDelay = 100 * time.Millisecond
+	t.Cleanup(func() { stopDelay = original })
+}
+
+// finishes fails the test if done does not return within a few seconds.
+func finishes(t *testing.T, what string, done func()) {
+	t.Helper()
+	finished := make(chan struct{})
+	go func() { done(); close(finished) }()
+	select {
+	case <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s is still waiting on a box that lingers", what)
+	}
+}
+
+// A box that answered, then keeps running after the session ends, is stopped
+// rather than waited on; so is one that failed the handshake.
+func TestLingeringBoxesAreStopped(t *testing.T) {
+	shortStop(t)
+	remote := vault.Remote{Name: "box", Destination: "box", Bin: vault.DefaultRemoteBin}
+
+	t.Setenv(serveHelperEnv, newVault(t).Dir())
+	t.Setenv(lingerHelperEnv, "1")
+	fakeSSH(t, `exec "`+os.Args[0]+`" -test.run='^TestServeHelper$'`)
+	session, err := Dial(remote, "test", io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finishes(t, "Close", func() { session.Close() })
+
+	fakeSSH(t, `echo junk; exec sleep 60`)
+	finishes(t, "Dial", func() { Dial(remote, "test", io.Discard) })
+}
+
+// ssh never sees the master passphrase: a ProxyCommand or LocalCommand would
+// inherit it, and a SendEnv pattern would hand it to the box.
+func TestDialKeepsThePassphraseFromSSH(t *testing.T) {
+	envFile := filepath.Join(t.TempDir(), "env")
+	t.Setenv(vault.PassphraseEnv, "not-for-ssh")
+	fakeSSH(t, `env > '`+envFile+`'`)
+
+	Dial(vault.Remote{Name: "box", Destination: "box", Bin: vault.DefaultRemoteBin}, "test", io.Discard)
+	env, err := os.ReadFile(envFile)
+	if err != nil || !strings.Contains(string(env), "PATH=") {
+		t.Fatalf("ssh's environment was not recorded: %v", err)
+	}
+	if strings.Contains(string(env), "not-for-ssh") {
+		t.Error("ssh inherited the master passphrase")
+	}
 }
 
 // A box command that exits cleanly without answering still gets a reason.
@@ -176,6 +237,9 @@ func TestServeHelper(t *testing.T) {
 	}
 	if err := Serve(v, os.Stdin, os.Stdout, "test", func(Access) {}); err != nil {
 		os.Exit(1)
+	}
+	if os.Getenv(lingerHelperEnv) != "" {
+		time.Sleep(time.Minute)
 	}
 	os.Exit(0)
 }

@@ -133,13 +133,26 @@ here                                         box
 - **No plaintext on any stdout.** Without the inner layer, an agent running
   `ssh box blindfold sync-serve` could read values off the stream. A frame
   altered, replayed, reordered or reflected ends the session, as does one over
-  16 MiB. A process that implements the handshake can still ask for values:
-  like `get --force`, that is deliberate work, not an accident, and
-  `sync-serve` refuses to run in a shell carrying an agent marker.
+  16 MiB. `sync-serve` refuses to run in a shell carrying an agent marker.
+- **A box set up for sync is readable over ssh.** Its vault must open in a
+  non-interactive ssh session, so anything that can ssh in as you can read
+  it: `ssh box blindfold get NAME --force`, or a pull into a throwaway vault.
+  Agent markers do not cross ssh, and a `blindfold` permission rule does not
+  match a command that starts with `ssh`. Keep `ssh` in the `ask` list
+  ([install](install.md#3-permission-rules)), and trust a box as you trust
+  this machine.
 - **A box answers only for what was asked.** A pull answered with another
   entry, or one twice, is refused before anything is stored; so are push
-  results for an entry never sent. An entry left out of an answer fails. Text
-  from a box is escaped before it reaches the terminal.
+  results for an entry never sent, an unknown outcome, and an entry name no
+  vault would accept. An entry left out of an answer fails. Text from a box
+  is escaped before it reaches the terminal, bidi controls included.
+- **A copy is whole, and loads no code.** An entry missing a value for a
+  secret it declares is refused rather than merged with the one already
+  there: a box cannot keep your key under its endpoint. An entry declaring a
+  variable that makes programs load code — `LD_PRELOAD`, `DYLD_*`,
+  `NODE_OPTIONS`, `GIT_SSH_COMMAND`, `PATH` and the like — is refused both
+  ways; add it by hand where it is meant. Every entry stored prints its
+  variable names.
 - **Nothing secret in argv.** ssh's arguments are fixed options, the
   destination and `<bin> sync-serve`.
 - **Each vault keeps its own key.** Values are re-sealed on arrival under the
@@ -153,8 +166,10 @@ here                                         box
   `~/.blindfold` can as easily edit `~/.ssh/config`, which decides where a
   destination connects.
 - **Both sides audit.** Here: `push`, `pull` and each `sync` comparison,
-  naming the box; a push the box refused is logged too, since its values were
-  sent. On the box: `sync-serve`, naming the ssh client's address.
+  naming the box; a push refused or never answered is logged too, since its
+  values were sent. On the box: `sync-serve`, naming the ssh client's
+  address, every entry received with what storing it did, and a refusal in
+  an agent's shell.
 
 A push hands the credential to that box and to anyone who controls it. blindfold
 trusts your SSH setup to reach the right machine; it cannot do better than
@@ -176,7 +191,8 @@ Failing loudly beats quietly downgrading:
   descriptions and tags.
 - Two loaded entries setting one variable to different values.
 - Replacing an entry that differs on the receiving box without `--overwrite`
-  or a yes in the picker; a box list sealed under another key; an ssh
+  or a yes in the picker; a copied entry missing a secret value, or declaring
+  a code-loading variable; a box list sealed under another key; an ssh
   destination that reads as an option.
 - Echoing a secret when the terminal cannot hide input.
 

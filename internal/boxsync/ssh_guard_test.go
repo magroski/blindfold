@@ -19,15 +19,37 @@ import (
 // exec.Command("ssh", box, "blindfold get …") in the CLI, say — would carry
 // plaintext past both, and no runtime test would notice it. Parsing, not
 // grepping, so an import alias cannot hide a call.
+//
+// The guard is a tripwire, not a proof. Inside the files allowed to start
+// programs, `sh -c "ssh …"` or a name built at run time still gets past it;
+// those files are few, and each change to them is read by a person.
 
 const (
 	sshFile      = "internal/boxsync/ssh.go" // the one file allowed to start ssh
-	sshBinary    = "ssh"
-	sshIdent     = "sshCommand" // what sshFile runs
-	sshArgsIdent = "sshArgs"    // the fixed arguments it always passes first
+	sshIdent     = "sshCommand"              // what sshFile runs
+	sshArgsIdent = "sshArgs"                 // the fixed arguments, first in every session
 )
 
+// sshBinaries are programs that speak ssh. A string naming one, outside
+// sshFile, is a call site in the making.
+var sshBinaries = map[string]bool{"ssh": true, "scp": true, "sftp": true}
+
+// processFiles may start other programs: ssh for a sync session, and the
+// command `blindfold exec` runs. Another file importing a package that starts
+// programs is a new call site, and must be added here by hand.
+var processFiles = map[string]bool{
+	sshFile:                      true,
+	"internal/cli/exec.go":       true,
+	"internal/cli/exec_other.go": true,
+	"internal/cli/exec_unix.go":  true,
+}
+
+// processImports start programs, or reach code that can ("C" calls execvp
+// as readily as anything else).
+var processImports = map[string]bool{"os/exec": true, "syscall": true, "golang.org/x/sys/unix": true, "C": true}
+
 // processStarters are the functions, by import path, that run another program.
+// An exec.Cmd literal counts too: it runs whatever Path it is given.
 var processStarters = map[string][]string{
 	"os/exec":               {"Command", "CommandContext"},
 	"os":                    {"StartProcess"},
@@ -35,9 +57,9 @@ var processStarters = map[string][]string{
 	"golang.org/x/sys/unix": {"Exec"},
 }
 
-// pinnedVars are set only where ssh.go declares them: reassigning either
-// changes what every session runs.
-var pinnedVars = map[string]bool{sshIdent: true, sshArgsIdent: true}
+// pinned are set once, where ssh.go declares them. Assigning, shadowing or
+// taking the address of either would change what a session runs.
+var pinned = map[string]bool{sshIdent: true, sshArgsIdent: true}
 
 // checkSSHUse lists every way the Go file at path (repo-relative, slash
 // separated) could run ssh other than ssh.go's one call.
@@ -48,28 +70,45 @@ func checkSSHUse(path, src string) []string {
 		return []string{"cannot parse: " + err.Error()}
 	}
 
-	starts, problems := processStarts(file)
-	if path != sshFile {
-		problems = append(problems, sshLiterals(file)...)
+	var problems []string
+	if !processFiles[path] {
+		problems = append(problems, processImportsIn(file)...)
 	}
-	// sshCommand and sshArgs are unexported: only this package can reach them.
-	inPackage := pathpkg.Dir(path) == pathpkg.Dir(sshFile)
+	starts, more := processStarts(file)
+	problems = append(problems, more...)
 	switch {
 	case path == sshFile:
 		problems = append(problems, checkTheOneStart(file, starts)...)
-	case inPackage && len(starts) > 0:
-		problems = append(problems, "starts a process; in this package only "+sshFile+" may")
+	case !processFiles[path] && len(starts) > 0:
+		problems = append(problems, "starts a program; only the files in processFiles may")
 	}
-	if inPackage {
-		problems = append(problems, reassigned(file)...)
+	if path != sshFile {
+		problems = append(problems, sshLiterals(file)...)
+	}
+	// The pinned names are unexported: only this package can reach them.
+	if pathpkg.Dir(path) == pathpkg.Dir(sshFile) {
+		problems = append(problems, touchesPinned(file, path == sshFile)...)
+	}
+	return problems
+}
+
+// processImportsIn reports each import of a package that starts programs.
+func processImportsIn(file *ast.File) []string {
+	var problems []string
+	for _, imp := range file.Imports {
+		if importPath, _ := strconv.Unquote(imp.Path.Value); processImports[importPath] {
+			problems = append(problems, fmt.Sprintf("imports %q, which starts programs; only the files in processFiles may", importPath))
+		}
 	}
 	return problems
 }
 
 // processStarts returns every use of a process-starting function, following
-// import aliases — called or not, since a function value is as good as a call.
-func processStarts(file *ast.File) (uses []*ast.SelectorExpr, problems []string) {
+// import aliases — called or not, since a function value is as good as a call
+// — and every exec.Cmd literal.
+func processStarts(file *ast.File) (uses []ast.Expr, problems []string) {
 	starters := map[string]map[string]bool{} // local package name → function names
+	execName := ""
 	for _, imp := range file.Imports {
 		importPath, _ := strconv.Unquote(imp.Path.Value)
 		funcs, ok := processStarters[importPath]
@@ -81,8 +120,11 @@ func processStarts(file *ast.File) (uses []*ast.SelectorExpr, problems []string)
 			name = imp.Name.Name
 		}
 		if name == "." {
-			problems = append(problems, "dot import of "+importPath+" hides which calls start processes")
+			problems = append(problems, "dot import of "+importPath+" hides which calls start programs")
 			continue
+		}
+		if importPath == "os/exec" {
+			execName = name
 		}
 		starters[name] = map[string]bool{}
 		for _, f := range funcs {
@@ -90,20 +132,25 @@ func processStarts(file *ast.File) (uses []*ast.SelectorExpr, problems []string)
 		}
 	}
 	ast.Inspect(file, func(n ast.Node) bool {
-		sel, ok := n.(*ast.SelectorExpr)
-		if !ok {
-			return true
-		}
-		if pkg, ok := sel.X.(*ast.Ident); ok && starters[pkg.Name][sel.Sel.Name] {
-			uses = append(uses, sel)
+		switch n := n.(type) {
+		case *ast.SelectorExpr:
+			if pkg, ok := n.X.(*ast.Ident); ok && starters[pkg.Name][n.Sel.Name] {
+				uses = append(uses, n)
+			}
+		case *ast.CompositeLit:
+			if sel, ok := n.Type.(*ast.SelectorExpr); ok && execName != "" && sel.Sel.Name == "Cmd" {
+				if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == execName {
+					uses = append(uses, n)
+				}
+			}
 		}
 		return true
 	})
 	return uses, problems
 }
 
-// sshLiterals finds strings naming ssh, e.g. "ssh", "/usr/bin/ssh", or the
-// import path of an ssh client of its own.
+// sshLiterals finds strings naming an ssh program, e.g. "ssh", "/usr/bin/scp",
+// or the import path of an ssh client of its own.
 func sshLiterals(file *ast.File) []string {
 	var problems []string
 	ast.Inspect(file, func(n ast.Node) bool {
@@ -111,7 +158,7 @@ func sshLiterals(file *ast.File) []string {
 		if !ok || lit.Kind != token.STRING {
 			return true
 		}
-		if value, err := strconv.Unquote(lit.Value); err == nil && pathpkg.Base(value) == sshBinary {
+		if value, err := strconv.Unquote(lit.Value); err == nil && sshBinaries[pathpkg.Base(value)] {
 			problems = append(problems, fmt.Sprintf("names ssh (%s); only %s may run it", lit.Value, sshFile))
 		}
 		return true
@@ -119,22 +166,23 @@ func sshLiterals(file *ast.File) []string {
 	return problems
 }
 
-// checkTheOneStart requires sshFile to start exactly one process, called
-// directly as exec.CommandContext(ctx, sshCommand, append(sshArgs, …)...), so
-// the fixed arguments always come first.
-func checkTheOneStart(file *ast.File, starts []*ast.SelectorExpr) []string {
+// checkTheOneStart requires sshFile to start exactly one program, called
+// directly as exec.CommandContext(ctx, sshCommand, append(sshArgs(), …)...),
+// so the fixed arguments always come first.
+func checkTheOneStart(file *ast.File, starts []ast.Expr) []string {
 	if len(starts) != 1 {
-		return []string{fmt.Sprintf("starts %d processes; it must start exactly one, ssh", len(starts))}
+		return []string{fmt.Sprintf("starts %d programs; it must start exactly one, ssh", len(starts))}
 	}
-	const want = "must start ssh as exec.CommandContext(ctx, " + sshIdent + ", append(" + sshArgsIdent + ", …)...)"
+	const want = "must start ssh as exec.CommandContext(ctx, " + sshIdent + ", append(" + sshArgsIdent + "(), …)...)"
+	sel, isSel := starts[0].(*ast.SelectorExpr)
 	var call *ast.CallExpr
 	ast.Inspect(file, func(n ast.Node) bool {
-		if c, ok := n.(*ast.CallExpr); ok && c.Fun == starts[0] {
+		if c, ok := n.(*ast.CallExpr); ok && isSel && c.Fun == sel {
 			call = c
 		}
 		return true
 	})
-	if call == nil || starts[0].Sel.Name != "CommandContext" || len(call.Args) != 3 || !call.Ellipsis.IsValid() {
+	if call == nil || sel.Sel.Name != "CommandContext" || len(call.Args) != 3 || !call.Ellipsis.IsValid() {
 		return []string{want}
 	}
 	command, isIdent := call.Args[1].(*ast.Ident)
@@ -143,39 +191,98 @@ func checkTheOneStart(file *ast.File, starts []*ast.SelectorExpr) []string {
 		return []string{want}
 	}
 	appendFn, isAppend := args.Fun.(*ast.Ident)
-	first, isFirst := args.Args[0].(*ast.Ident)
-	if !isAppend || appendFn.Name != "append" || !isFirst || first.Name != sshArgsIdent {
+	first, isFirstCall := args.Args[0].(*ast.CallExpr)
+	if !isAppend || appendFn.Name != "append" || !isFirstCall || len(first.Args) != 0 {
+		return []string{want}
+	}
+	if fn, ok := first.Fun.(*ast.Ident); !ok || fn.Name != sshArgsIdent {
 		return []string{want}
 	}
 	return nil
 }
 
-// reassigned finds assignments to a pinned variable, or to one of its elements.
-func reassigned(file *ast.File) []string {
+// touchesPinned finds every assignment to a pinned name or its elements,
+// every declaration of one but sshFile's own at package level, and every
+// address taken of one.
+func touchesPinned(file *ast.File, isSSHFile bool) []string {
 	var problems []string
-	ast.Inspect(file, func(n ast.Node) bool {
-		assign, ok := n.(*ast.AssignStmt)
-		if !ok {
-			return true
-		}
-		for _, lhs := range assign.Lhs {
-			for lhs != nil {
-				switch x := lhs.(type) {
-				case *ast.Ident:
-					if pinnedVars[x.Name] {
-						problems = append(problems, "assigns "+x.Name+"; it is set once, where "+sshFile+" declares it")
+	report := func(what, name string) {
+		problems = append(problems, fmt.Sprintf("%s %s; it is set once, where %s declares it", what, name, sshFile))
+	}
+	topLevel := map[*ast.Ident]bool{}
+	for _, decl := range file.Decls {
+		switch d := decl.(type) {
+		case *ast.GenDecl:
+			for _, spec := range d.Specs {
+				if vs, ok := spec.(*ast.ValueSpec); ok {
+					for _, name := range vs.Names {
+						topLevel[name] = isSSHFile
 					}
-					lhs = nil
-				case *ast.IndexExpr:
-					lhs = x.X
-				default:
-					lhs = nil
 				}
+			}
+		case *ast.FuncDecl:
+			if d.Recv == nil {
+				topLevel[d.Name] = isSSHFile
+			}
+		}
+	}
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.AssignStmt:
+			for _, lhs := range n.Lhs {
+				if name := rootIdent(lhs); pinned[name] {
+					if n.Tok == token.DEFINE {
+						report("declares", name)
+					} else {
+						report("assigns", name)
+					}
+				}
+			}
+		case *ast.ValueSpec:
+			for _, name := range n.Names {
+				if pinned[name.Name] && !topLevel[name] {
+					report("declares", name.Name)
+				}
+			}
+		case *ast.FuncDecl:
+			if pinned[n.Name.Name] && !topLevel[n.Name] {
+				report("declares", n.Name.Name)
+			}
+		case *ast.Field:
+			for _, name := range n.Names {
+				if pinned[name.Name] {
+					report("declares", name.Name)
+				}
+			}
+		case *ast.RangeStmt:
+			for _, x := range []ast.Expr{n.Key, n.Value} {
+				if id, ok := x.(*ast.Ident); ok && pinned[id.Name] {
+					report("declares", id.Name)
+				}
+			}
+		case *ast.UnaryExpr:
+			if id, ok := n.X.(*ast.Ident); ok && n.Op == token.AND && pinned[id.Name] {
+				report("takes the address of", id.Name)
 			}
 		}
 		return true
 	})
 	return problems
+}
+
+// rootIdent is the variable an assignment target writes through:
+// sshArgs[0] writes sshArgs.
+func rootIdent(e ast.Expr) string {
+	for {
+		switch x := e.(type) {
+		case *ast.Ident:
+			return x.Name
+		case *ast.IndexExpr:
+			e = x.X
+		default:
+			return ""
+		}
+	}
 }
 
 // moduleSources reads every non-test Go file of this module, keyed by
@@ -246,7 +353,7 @@ func goFile(pkg string, imports []string, body string) string {
 // one call that it must catch.
 func TestSSHGuardCatchesBypasses(t *testing.T) {
 	const theOneStart = "func dial(ctx context.Context) *exec.Cmd {\n" +
-		"\treturn exec.CommandContext(ctx, sshCommand, append(sshArgs, \"box\")...)\n}"
+		"\treturn exec.CommandContext(ctx, sshCommand, append(sshArgs(), \"box\")...)\n}"
 	exec := []string{`"context"`, `"os/exec"`}
 
 	cases := []struct {
@@ -257,13 +364,25 @@ func TestSSHGuardCatchesBypasses(t *testing.T) {
 			name: "ssh from the CLI",
 			path: "internal/cli/peek.go",
 			src:  goFile("cli", exec, `func peek() { exec.Command("ssh", "box", "blindfold get X") }`),
-			want: []string{`"ssh"`},
+			want: []string{`"ssh"`, `imports "os/exec"`},
 		},
 		{
-			name: "aliased exec with a full path",
-			path: "internal/cli/peek.go",
+			name: "aliased exec with a full path, in an allowed file",
+			path: "internal/cli/exec.go",
 			src:  goFile("cli", []string{`run "os/exec"`}, `var peek = run.Command("/usr/bin/ssh")`),
 			want: []string{"/usr/bin/ssh"},
+		},
+		{
+			name: "scp named in an allowed file",
+			path: "internal/cli/exec_unix.go",
+			src:  goFile("cli", nil, `const copier = "scp"`),
+			want: []string{`"scp"`},
+		},
+		{
+			name: "a shell that runs ssh, from a new file",
+			path: "internal/cli/peek.go",
+			src:  goFile("cli", exec, `func peek() { exec.Command("sh", "-c", "s"+"sh box blindfold get X") }`),
+			want: []string{`imports "os/exec"`, "starts a program"},
 		},
 		{
 			name: "an ssh client of its own",
@@ -272,34 +391,55 @@ func TestSSHGuardCatchesBypasses(t *testing.T) {
 			want: []string{"golang.org/x/crypto/ssh"},
 		},
 		{
-			name: "dot import hides the call",
+			name: "cgo, which can call execvp",
 			path: "internal/cli/peek.go",
+			src:  goFile("cli", []string{`"C"`}, ""),
+			want: []string{`imports "C"`},
+		},
+		{
+			name: "os.StartProcess, whose package every file imports",
+			path: "internal/cli/peek.go",
+			src:  goFile("cli", []string{`"os"`}, `var peek = os.StartProcess`),
+			want: []string{"starts a program"},
+		},
+		{
+			name: "dot import hides the call",
+			path: "internal/cli/exec.go",
 			src:  goFile("cli", []string{`. "os/exec"`}, `var peek = Command`),
 			want: []string{"dot import"},
 		},
 		{
-			name: "another process start in the package",
+			name: "another start in the package",
 			path: "internal/boxsync/peek.go",
 			src:  goFile("boxsync", exec, `func peek() { exec.Command(sshCommand, "box") }`),
-			want: []string{"only " + sshFile},
+			want: []string{`imports "os/exec"`, "starts a program"},
 		},
 		{
-			name: "syscall.Exec in the package, as a value",
+			name: "the command rewritten",
 			path: "internal/boxsync/peek.go",
-			src:  goFile("boxsync", []string{`"syscall"`}, `var peek = syscall.Exec`),
-			want: []string{"only " + sshFile},
+			src:  goFile("boxsync", nil, `func init() { sshCommand = "/tmp/evil" }`),
+			want: []string{"assigns " + sshIdent},
 		},
 		{
-			name: "the fixed arguments rewritten",
+			name: "the command's address taken",
 			path: "internal/boxsync/peek.go",
-			src:  goFile("boxsync", nil, `func init() { sshArgs = append(sshArgs, "-oProxyCommand=sh") }`),
-			want: []string{"assigns " + sshArgsIdent},
+			src:  goFile("boxsync", nil, `var p = &sshCommand`),
+			want: []string{"takes the address of " + sshIdent},
 		},
 		{
-			name: "one fixed argument replaced",
-			path: "internal/boxsync/peek.go",
-			src:  goFile("boxsync", nil, `func init() { sshArgs[0] = "-A" }`),
-			want: []string{"assigns " + sshArgsIdent},
+			name: "the command shadowed by a parameter",
+			path: sshFile,
+			src: goFile("boxsync", exec, "func dial(ctx context.Context, sshCommand string) *exec.Cmd {\n"+
+				"\treturn exec.CommandContext(ctx, sshCommand, append(sshArgs(), \"box\")...)\n}"),
+			want: []string{"declares " + sshIdent},
+		},
+		{
+			name: "the arguments shadowed by a local",
+			path: sshFile,
+			src: goFile("boxsync", exec, "func dial(ctx context.Context) *exec.Cmd {\n"+
+				"\tsshArgs := func() []string { return []string{\"-A\"} }\n"+
+				"\treturn exec.CommandContext(ctx, sshCommand, append(sshArgs(), \"box\")...)\n}"),
+			want: []string{"declares " + sshArgsIdent},
 		},
 		{
 			name: "ssh without the fixed arguments",
@@ -308,7 +448,13 @@ func TestSSHGuardCatchesBypasses(t *testing.T) {
 			want: []string{"must start ssh as"},
 		},
 		{
-			name: "a second process in ssh.go",
+			name: "an exec.Cmd literal beside the one call",
+			path: sshFile,
+			src:  goFile("boxsync", exec, theOneStart+"\n\nvar other = &exec.Cmd{Path: \"/bin/sh\"}"),
+			want: []string{"exactly one"},
+		},
+		{
+			name: "a second program in ssh.go",
 			path: sshFile,
 			src:  goFile("boxsync", exec, theOneStart+"\n\nfunc again() { exec.Command(\"sh\") }"),
 			want: []string{"exactly one"},
@@ -327,7 +473,9 @@ func TestSSHGuardCatchesBypasses(t *testing.T) {
 	}
 
 	// The shape ssh.go must keep passes: the guard is not simply always failing.
-	if problems := checkSSHUse(sshFile, goFile("boxsync", exec, theOneStart)); len(problems) > 0 {
+	allowed := goFile("boxsync", exec, "var sshCommand = \"ssh\"\n\n"+
+		"func sshArgs() []string { return []string{\"-T\"} }\n\n"+theOneStart)
+	if problems := checkSSHUse(sshFile, allowed); len(problems) > 0 {
 		t.Errorf("the one allowed call was refused: %v", problems)
 	}
 }

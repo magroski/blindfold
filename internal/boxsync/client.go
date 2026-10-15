@@ -32,6 +32,8 @@ type Session struct {
 	// abort ends the session from outside a blocked read or write; nil when
 	// nothing can, as over in-memory pipes.
 	abort func()
+	// ended is why the session stopped working; every later call returns it.
+	ended error
 }
 
 // Connect opens a session over r and w, the box's stdout and stdin.
@@ -62,6 +64,11 @@ func (s *Session) Status(local *vault.Vault) (map[string]State, error) {
 	}
 	remote := make(map[string][]byte, len(resp.Digests))
 	for _, d := range resp.Digests {
+		// The names land in the table and in picker commands: hold them to
+		// the rules every vault does.
+		if err := vault.ValidateEntryName(d.Name); err != nil {
+			return nil, fmt.Errorf("the box listed an entry no vault would accept: %w", err)
+		}
 		remote[d.Name] = d.Digest
 	}
 
@@ -90,11 +97,11 @@ func (s *Session) Status(local *vault.Vault) (map[string]State, error) {
 }
 
 // Push copies whole entries from here to the box. Names are resolved here
-// before anything is sent.
+// before anything is sent; a failure doing so is a NotSentError.
 func (s *Session) Push(local *vault.Vault, names []string, overwrite bool) ([]Result, error) {
 	credentials, err := export(local, names)
 	if err != nil {
-		return nil, err
+		return nil, &NotSentError{Err: err}
 	}
 	resp, err := s.call(request{Op: OpPush, Entries: credentials, Overwrite: overwrite})
 	if err != nil {
@@ -102,6 +109,10 @@ func (s *Session) Push(local *vault.Vault, names []string, overwrite bool) ([]Re
 	}
 	answered := make([]string, 0, len(resp.Results))
 	for _, r := range resp.Results {
+		if !r.Outcome.valid() {
+			return nil, fmt.Errorf("the box answered for %q with an outcome that is not one of %s, %s, %s, %s or %s",
+				r.Name, Created, Updated, Unchanged, Conflict, Failed)
+		}
 		answered = append(answered, r.Name)
 	}
 	missing, err := onlyAskedFor(answered, names)
@@ -175,13 +186,24 @@ var answerTimeout = 60 * time.Second
 // errTimeout ends a session whose box took longer than answerTimeout.
 var errTimeout = errors.New("no answer from the box in time")
 
+// NotSentError is a push that failed here, before anything left this machine.
+type NotSentError struct{ Err error }
+
+func (e *NotSentError) Error() string { return e.Err.Error() }
+func (e *NotSentError) Unwrap() error { return e.Err }
+
 // RemoteError is a failure the box reported, as opposed to one here.
 type RemoteError struct{ Msg string }
 
 func (e *RemoteError) Error() string { return e.Msg }
 
-// call sends one request and returns its answer, or the box's error.
+// call sends one request and returns its answer, or the box's error. A
+// failure to exchange ends the session; an error the box answered with does
+// not.
 func (s *Session) call(req request) (response, error) {
+	if s.ended != nil {
+		return response{}, s.ended
+	}
 	var resp response
 	err := withinTimeout(s.abort, func() error {
 		if err := s.ch.Send(req); err != nil {
@@ -190,6 +212,7 @@ func (s *Session) call(req request) (response, error) {
 		return s.ch.Receive(&resp)
 	})
 	if err != nil {
+		s.ended = err
 		return response{}, err
 	}
 	if resp.Error != "" {

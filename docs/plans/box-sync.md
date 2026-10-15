@@ -269,3 +269,19 @@ Rejected:
   runs `scripts/sync-e2e.sh` on Ubuntu (Linux ⇄ Linux; macOS runners have no
   docker). `ssh_guard_test.go` confines ssh to the one call in `ssh.go`, fixed
   arguments first. Goal and Approach unchanged.
+- PR review (adversarial + security, 2026-10-15). Fixed, tests first: `Put`
+  re-reads vault.json, so a held-open picker or sync-serve no longer writes
+  back stale metadata; a copy missing a secret is refused, not merged; values
+  travel and compare as bytes; closing a session stops a lingering ssh; ssh
+  does not inherit `BLINDFOLD_PASSPHRASE`; box names and outcomes validated,
+  bidi controls escaped; every push that sent values is audited on both sides,
+  and sync-serve's refusal too; a failed session stays failed; `\r\n` from
+  ssh is a newline; the ssh guard allowlists files that start programs.
+- Q: an agent can read a sync-ready box with `ssh box blindfold get --force`.
+  A: docs + `Bash(ssh:*)` ask rule (user), because the box's vault must open
+  non-interactively, so no code change closes it.
+- Q: a box can plant variables in a pulled entry. A: show variable names on
+  every stored entry, and refuse code-loading variables both ways (user).
+- Q: an older binary drops the box list. A: document it (user).
+- Deferred: one unsealable entry marks a whole box unreachable; no size limit
+  below the 16 MiB frame for a single value.

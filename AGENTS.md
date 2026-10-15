@@ -67,7 +67,8 @@ Keychain (`kek_darwin.go`, cgo) or the Linux Secret Service over D-Bus
   that change the vault — `add`, `edit`, `rm`, `import`, `init` — go in `ask`
   beside `env`, `get` and `export`: `edit --var` can repoint a public endpoint,
   and the secret beside it would follow. So do `remote`, `sync`, `push`, `pull`
-  and `sync-serve`: they copy credentials to other machines.
+  and `sync-serve`: they copy credentials to other machines. So does `ssh`
+  itself: a box set up for sync opens its vault to any ssh session.
 - **Values cross between boxes only inside the encrypted channel.**
   `internal/boxsync` runs the system `ssh` and, inside it, its own X25519 +
   XChaCha20-Poly1305 session, so `sync-serve`'s stdout is never plaintext.
@@ -75,10 +76,13 @@ Keychain (`kek_darwin.go`, cgo) or the Linux Secret Service over D-Bus
   `vault.sealed`; a box's `--bin` is held to characters every shell reads
   literally, because it reaches the box's login shell unquoted.
   `scripts/sync-e2e.sh` proves it against a Linux box over real OpenSSH.
-  ssh runs from one call in `internal/boxsync/ssh.go`, fixed arguments first;
-  `ssh_guard_test.go` enforces it. A box gets 60 seconds to answer each
-  request; an idle session never times out, because the picker waits on a
-  person.
+  ssh runs from one call in `internal/boxsync/ssh.go`, fixed arguments first,
+  without `BLINDFOLD_PASSPHRASE`; `ssh_guard_test.go` enforces it, and a new
+  file that starts programs must be added to its allowlist by hand. A copy is
+  whole — a missing secret is refused, never merged — and may not declare a
+  code-loading variable (`codeLoadingVars` in `internal/boxsync/protocol.go`).
+  A box gets 60 seconds to answer each request; an idle session never times
+  out, because the picker waits on a person.
 
 ## Reading several secrets
 

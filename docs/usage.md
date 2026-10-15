@@ -141,7 +141,10 @@ blindfold push linux-box pg-ro --overwrite    # replace an entry that differs
 
 A credential travels whole — description, tags, every variable — and is sealed
 on arrival under the receiving vault's own master key. `≠` compares secret
-values too, without sending them. Removing an entry is never copied.
+values too, without sending them. Removing an entry is never copied. Each
+entry stored prints its variable names (`stripe  created: STRIPE_KEY`); one
+declaring a variable that makes programs load code, such as `LD_PRELOAD` or
+`GIT_SSH_COMMAND`, is refused — add it by hand where it is meant.
 
 ### Setting up a box
 
@@ -155,6 +158,12 @@ terminal does:
   `~/.bashrc`, above any line that returns early for non-interactive shells.
 - **macOS:** the Keychain may be locked in an ssh session; unlock it with
   `security unlock-keychain`, or use a key or passphrase file.
+
+A box set up this way opens its vault to anything that can ssh in as you,
+an agent included: keep `ssh` in the `ask` list (see
+[security](security.md#between-dev-boxes)). Install the same blindfold on
+every machine: an older one that writes the vault forgets the box list
+(`remote add` again; no credential is lost).
 
 Check a box with `ssh <box> blindfold doctor`. When a box fails, `sync` and
 `push` show its own message and change nothing. A box gets 60 seconds to

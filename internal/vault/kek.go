@@ -41,6 +41,10 @@ const (
 	envKEKFile        = "BLINDFOLD_KEK_FILE"
 	envPassphraseFile = "BLINDFOLD_PASSPHRASE_FILE"
 	envPassphrase     = "BLINDFOLD_PASSPHRASE"
+
+	// PassphraseEnv is the key source a child process would inherit; programs
+	// blindfold starts must not.
+	PassphraseEnv = envPassphrase
 )
 
 // NewKeySource picks a key source from the environment, most explicit first.

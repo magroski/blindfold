@@ -59,9 +59,8 @@ func handle(v *vault.Vault, ch *Channel, req request, observe func(Access)) resp
 		results := make([]Result, 0, len(req.Entries))
 		for _, c := range req.Entries {
 			result := store(v, ch, c, req.Overwrite)
-			if result.Outcome == Created || result.Outcome == Updated {
-				observe(Access{Op: OpPush, Entry: c.Entry.Name, Vars: c.Entry.VarNames()})
-			}
+			// Stored or not, the values arrived here.
+			observe(Access{Op: OpPush, Entry: c.Entry.Name, Vars: c.Entry.VarNames(), Outcome: result.Outcome})
 			results = append(results, result)
 		}
 		return response{Results: results}

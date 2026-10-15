@@ -28,9 +28,9 @@ type box struct {
 // both ways, and routes destination <d> to the box registered under <d>.
 // A remote command starting with "missing " fails as a shell would; one
 // starting with "future " is a blindfold that speaks another protocol; one
-// starting with "noisy " writes terminal control sequences to stderr. An
-// unregistered destination fails as ssh would, so no test reaches the real
-// ~/.blindfold.
+// starting with "noisy " writes terminal control sequences to stderr; one
+// starting with "cut " hangs up once the first request arrives. An unregistered destination
+// fails as ssh would, so no test reaches the real ~/.blindfold.
 type sshWorld struct {
 	argv string // file: every ssh argument, one per line
 	wire string // file: every byte between the two blindfolds
@@ -49,8 +49,10 @@ case "$8" in
   missing\ *) echo "sh: missing: command not found" >&2; exit 127;;
   future\ *) read -r _; printf '%s\n' '{"proto":99,"version":"v9\u001b]0;owned\u0007","pub":"AAAA"}'; exit 1;;
   noisy\ *) printf 'motd \033]0;owned\007\033[31m\n' >&2; exit 1;;
+  cut\ *) read -r _; printf '%s\n' '{"proto":1,"version":"cut","pub":"AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA="}'
+    read -r _; exit 1;;
 esac
-eval "dir=\$BOX_DIR_$dest kek=\$BOX_KEK_$dest"
+case "$dest" in *[!A-Za-z0-9_]* | '') dir= ;; *) eval "dir=\$BOX_DIR_$dest kek=\$BOX_KEK_$dest" ;; esac
 if [ -z "$dir" ]; then echo "ssh: Could not resolve hostname $dest" >&2; exit 255; fi
 tee -a "` + w.wire + `" | BLINDFOLD_DIR="$dir" BLINDFOLD_KEK_FILE="$kek" ` + helperEnv + `=1 \
   "` + os.Args[0] + `" -test.run='^TestExecHelperProcess$' -- sync-serve | tee -a "` + w.wire + `"
@@ -128,7 +130,8 @@ func TestPushAndPullBetweenBoxes(t *testing.T) {
 		t.Fatal(err)
 	}
 	mac.mustRun("", "add", "box-pair", "--from-file", dotenv)
-	if out := h.mustRun("", "pull", "mac-box", "box-pair"); !strings.Contains(out, "created") {
+	// The output names every variable stored, so a planted one is seen.
+	if out := h.mustRun("", "pull", "mac-box", "box-pair"); !strings.Contains(out, "created: BOX_TOKEN, BOX_SIGNING_KEY") {
 		t.Errorf("pull said %q", out)
 	}
 	for variable, want := range map[string]string{"BOX_TOKEN": boxSecret, "BOX_SIGNING_KEY": localSecret} {
@@ -315,6 +318,21 @@ func TestBoxTextKeepsSplitCharacters(t *testing.T) {
 	}
 }
 
+// ssh ends its messages with \r\n: that is a newline, not text. A lone \r, or
+// a bidi control that would reorder what follows, is escaped.
+func TestBoxTextReadsCRLFAsANewline(t *testing.T) {
+	var out bytes.Buffer
+	w := &boxText{w: &out}
+	w.Write([]byte("ssh: connect failed\r"))
+	w.Write([]byte("\nover\rwritten \u202eeman\n"))
+	if got, want := out.String(), "ssh: connect failed\nover\\rwritten \\u202eeman\n"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	if got := printable("evil\u202etxt.exe"); !strings.Contains(got, `\u202e`) {
+		t.Errorf("printable passed a bidi control: %q", got)
+	}
+}
+
 // A registry sealed under another key — copied in from another vault — stops
 // every command that reads it before ssh runs.
 func TestSyncRefusesForeignRegistry(t *testing.T) {
@@ -466,11 +484,30 @@ func TestPickerEscapesBoxErrors(t *testing.T) {
 // shell, nothing legitimate runs it: ssh starts it on the box, without the
 // agent's markers.
 func TestSyncServeRefusesAgentShell(t *testing.T) {
-	newHarness(t)
+	h := newHarness(t)
 	t.Setenv("CLAUDECODE", "1")
 	var stdout, stderr bytes.Buffer
 	code := Run(t.Context(), Env{Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr}, []string{"sync-serve"})
 	if code == 0 || !strings.Contains(stderr.String(), "CLAUDECODE") {
 		t.Errorf("sync-serve in an agent's shell exited %d: %s", code, stderr.String())
+	}
+	if log := readFile(t, filepath.Join(h.dir, "audit.log")); !strings.Contains(log, `"sync-serve"`) || !strings.Contains(log, "denied") {
+		t.Errorf("the refusal was not audited as denied: %s", log)
+	}
+}
+
+// A push the box never answered still handed it the values: it is audited.
+func TestPushWithoutAnAnswerIsAudited(t *testing.T) {
+	h := newHarness(t)
+	world := newSSHWorld(t)
+	world.newBox(t, "mac")
+	h.mustRun(localSecret, "add", "LOCAL_KEY")
+	h.mustRun("", "remote", "add", "mac-box", "mac", "--bin", "cut")
+
+	if code, _, stderr := h.run("", "push", "mac-box", "LOCAL_KEY"); code == 0 {
+		t.Fatalf("a push without an answer succeeded: %s", stderr)
+	}
+	if log := readFile(t, filepath.Join(h.dir, "audit.log")); !strings.Contains(log, "LOCAL_KEY") || !strings.Contains(log, "no answer") {
+		t.Errorf("the push was not audited: %s", log)
 	}
 }

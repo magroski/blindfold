@@ -54,25 +54,33 @@ func Open(dir string) (*Vault, error) {
 		meta: &Metadata{Version: metadataVersion},
 		keys: NewKeySource(dir),
 	}
-
-	data, err := os.ReadFile(filepath.Join(dir, MetadataFile))
-	if errors.Is(err, os.ErrNotExist) {
-		return v, nil
-	}
-	if err != nil {
+	if err := v.loadMetadata(); err != nil {
 		return nil, err
 	}
-	if err := json.Unmarshal(data, v.meta); err != nil {
-		return nil, fmt.Errorf("vault: %s is corrupt: %w", MetadataFile, err)
+	return v, nil
+}
+
+// loadMetadata reads vault.json, if there is one, over v's metadata.
+func (v *Vault) loadMetadata() error {
+	data, err := os.ReadFile(filepath.Join(v.dir, MetadataFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
 	}
-	v.exists = true
-	if v.meta.Version != metadataVersion {
-		return nil, fmt.Errorf("vault: %s has version %d, this build supports %d. "+
+	if err != nil {
+		return err
+	}
+	meta := &Metadata{Version: metadataVersion}
+	if err := json.Unmarshal(data, meta); err != nil {
+		return fmt.Errorf("vault: %s is corrupt: %w", MetadataFile, err)
+	}
+	if meta.Version != metadataVersion {
+		return fmt.Errorf("vault: %s has version %d, this build supports %d. "+
 			"Version 1 vaults were written by the kind-based (database/http/env) layout; "+
 			"there is no automatic migration — re-add the entries",
-			MetadataFile, v.meta.Version, metadataVersion)
+			MetadataFile, meta.Version, metadataVersion)
 	}
-	return v, nil
+	v.meta, v.exists = meta, true
+	return nil
 }
 
 // Dir reports the vault directory.
@@ -209,6 +217,12 @@ func (v *Vault) Put(entry Entry, values map[string]string) error {
 	}
 	sealed, err := v.openSealed(kek)
 	if err != nil {
+		return err
+	}
+	// Start from vault.json as it is now, as the sealed file just was: a
+	// process held open — the sync picker, a box's sync-serve — would
+	// otherwise write back what it read at start over changes made since.
+	if err := v.loadMetadata(); err != nil {
 		return err
 	}
 	if old, ok := v.meta.Find(entry.Name); ok {

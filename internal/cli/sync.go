@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/magroski/blindfold/internal/audit"
@@ -78,7 +77,7 @@ func cmdTransfer(env Env, op string, args []string) error {
 	if err != nil {
 		return err
 	}
-	return reportTransfer(env.Stdout, op, remote.Name, results)
+	return reportTransfer(env.Stdout, v, op, remote.Name, results)
 }
 
 // transfer moves entries one way and records each in the audit log.
@@ -89,13 +88,19 @@ func transfer(env Env, v *vault.Vault, session *boxsync.Session, box, op string,
 	}
 	log := auditLog(env, v.Dir())
 	results, err := run(v, names, overwrite)
-	// A box that refused a push was still sent the values, sealed.
-	var refused *boxsync.RemoteError
-	if op == pushCommand && errors.As(err, &refused) {
+	// Unless it failed here first, a push handed the box the values, sealed,
+	// whether or not an answer came back.
+	var notSent *boxsync.NotSentError
+	if op == pushCommand && err != nil && !errors.As(err, &notSent) {
+		reason := "no answer"
+		var refused *boxsync.RemoteError
+		if errors.As(err, &refused) {
+			reason = "refused by the box"
+		}
 		for _, name := range names {
 			log.Log(audit.Event{
 				Tool: op, Secret: name, Decision: audit.Allowed,
-				Reason: preposition + box + ": refused by the box",
+				Reason: preposition + box + ": " + reason,
 			})
 		}
 	}
@@ -118,10 +123,10 @@ func transfer(env Env, v *vault.Vault, session *boxsync.Session, box, op string,
 
 // reportTransfer prints one line per entry, and fails when any entry was not
 // stored: a conflict left as it was, or an error.
-func reportTransfer(w io.Writer, op, box string, results []boxsync.Result) error {
+func reportTransfer(w io.Writer, v *vault.Vault, op, box string, results []boxsync.Result) error {
 	conflicts, failures := 0, 0
 	for _, r := range results {
-		printResult(w, r)
+		printResult(w, v, r)
 		switch r.Outcome {
 		case boxsync.Conflict:
 			conflicts++
@@ -140,16 +145,23 @@ func reportTransfer(w io.Writer, op, box string, results []boxsync.Result) error
 }
 
 // printResult prints one entry's outcome, e.g. "API_KEY  conflict: differs,
-// left as it was".
-func printResult(w io.Writer, r boxsync.Result) {
+// left as it was". An entry just written names its variables, from v, so one
+// a box slipped in is seen: "stripe  created: STRIPE_KEY, STRIPE_URL".
+func printResult(w io.Writer, v *vault.Vault, r boxsync.Result) {
 	name := printable(r.Name) // a box's answer: never raw to the terminal
 	switch r.Outcome {
 	case boxsync.Conflict:
 		fmt.Fprintf(w, "%s  %s: differs, left as it was\n", name, r.Outcome)
 	case boxsync.Failed:
 		fmt.Fprintf(w, "%s  %s: %s\n", name, r.Outcome, printable(r.Error))
+	case boxsync.Created, boxsync.Updated:
+		if entry, ok := v.Get(r.Name); ok {
+			fmt.Fprintf(w, "%s  %s: %s\n", name, r.Outcome, strings.Join(entry.VarNames(), ", "))
+			return
+		}
+		fmt.Fprintf(w, "%s  %s\n", name, r.Outcome)
 	default:
-		fmt.Fprintf(w, "%s  %s\n", name, printable(string(r.Outcome)))
+		fmt.Fprintf(w, "%s  %s\n", name, r.Outcome)
 	}
 }
 
@@ -347,9 +359,14 @@ func (b *boxText) Write(p []byte) (int, error) {
 	b.pending = nil
 	var out strings.Builder
 	for len(data) > 0 {
-		if !utf8.FullRune(data) {
+		if !utf8.FullRune(data) || (len(data) == 1 && data[0] == '\r') {
 			b.pending = append([]byte(nil), data...) // the rest is in the next write
 			break
+		}
+		// ssh ends its own messages with "\r\n": a newline, not a stray \r.
+		if data[0] == '\r' && data[1] == '\n' {
+			data = data[1:]
+			continue
 		}
 		r, size := utf8.DecodeRune(data)
 		out.WriteString(escapeRune(r, data[:size]))
@@ -369,7 +386,7 @@ func escapeRune(r rune, raw []byte) string {
 		return string(r)
 	case r == utf8.RuneError && len(raw) == 1:
 		return fmt.Sprintf(`\x%02x`, raw[0])
-	case unicode.IsControl(r):
+	case unsafeRune(r):
 		quoted := strconv.QuoteRune(r)
 		return quoted[1 : len(quoted)-1]
 	}
@@ -382,20 +399,24 @@ func cmdSyncServe(env Env, args []string) error {
 	if len(args) > 0 {
 		return fmt.Errorf("%s takes no arguments; push, pull and sync run it over ssh", serveCommand)
 	}
-	// Whoever completes the handshake gets values. ssh starts this on a box
-	// without an agent's markers; an agent's shell has no business running it.
-	if reason := agentShellReason(os.LookupEnv); reason != "" {
-		return fmt.Errorf("refusing to serve credentials: %s. %s is started by push, pull and sync over ssh",
-			reason, serveCommand)
-	}
 	v, err := openVault()
 	if err != nil {
 		return err
 	}
 	peer := sshPeer()
 	log := auditLog(env, v.Dir())
+	// Whoever completes the handshake gets values. ssh starts this on a box
+	// without an agent's markers; an agent's shell has no business running it.
+	if reason := agentShellReason(os.LookupEnv); reason != "" {
+		log.Log(audit.Event{Tool: serveCommand, Decision: audit.Denied, Reason: reason})
+		return fmt.Errorf("refusing to serve credentials: %s. %s is started by push, pull and sync over ssh",
+			reason, serveCommand)
+	}
 	err = boxsync.Serve(v, env.Stdin, env.Stdout, env.Version, func(a boxsync.Access) {
 		reason := "received from " + peer
+		if a.Outcome != "" {
+			reason += ": " + string(a.Outcome)
+		}
 		switch a.Op {
 		case boxsync.OpPull:
 			reason = "sent to " + peer

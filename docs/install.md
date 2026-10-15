@@ -124,7 +124,8 @@ In `~/.claude/settings.json`, or per project in `.claude/settings.json`:
       "Bash(blindfold add:*)", "Bash(blindfold edit:*)", "Bash(blindfold rm:*)",
       "Bash(blindfold remove:*)", "Bash(blindfold import:*)", "Bash(blindfold init:*)",
       "Bash(blindfold remote:*)", "Bash(blindfold sync:*)", "Bash(blindfold push:*)",
-      "Bash(blindfold pull:*)", "Bash(blindfold sync-serve:*)"
+      "Bash(blindfold pull:*)", "Bash(blindfold sync-serve:*)",
+      "Bash(ssh:*)"
     ]
   }
 }
@@ -137,4 +138,7 @@ full command, which is the check you want.
 
 Prefix rules match how a command starts. A wrapper — `sh -c '…'`, `env -u X …`,
 `script … blindfold get` — starts differently, so keep broad rules such as
-`Bash(sh:*)` out of `allow` too.
+`Bash(sh:*)` out of `allow` too. `ssh` is the wrapper that matters once you
+sync: a box set up for it opens its vault to any ssh session, so
+`ssh box blindfold get NAME --force` prints a value, and no `blindfold` rule
+sees it. `Bash(ssh:*)` above makes every ssh an agent runs a deliberate act.

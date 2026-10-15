@@ -86,14 +86,14 @@ func pickTransfer(env Env, view *syncView, p *prompter, b *boxView, op string, n
 	var replace []string
 	for _, r := range results {
 		if r.Outcome != boxsync.Conflict {
-			printResult(env.Stdout, r)
+			printResult(env.Stdout, view.local, r)
 			continue
 		}
 		if p.yesNo(fmt.Sprintf("%s differs %s. Replace it? [y/N] ", printable(r.Name), where), false) {
 			replace = append(replace, r.Name)
 			continue
 		}
-		printResult(env.Stdout, r)
+		printResult(env.Stdout, view.local, r)
 	}
 	if len(replace) == 0 {
 		return nil
@@ -103,7 +103,7 @@ func pickTransfer(env Env, view *syncView, p *prompter, b *boxView, op string, n
 		return err
 	}
 	for _, r := range results {
-		printResult(env.Stdout, r)
+		printResult(env.Stdout, view.local, r)
 	}
 	return nil
 }

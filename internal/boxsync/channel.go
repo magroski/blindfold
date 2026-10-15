@@ -68,6 +68,8 @@ type Channel struct {
 	send, recv       cipher.AEAD
 	sendSeq, recvSeq uint64
 	digestKey        []byte
+	// failed is the first frame that would not open; the session is over.
+	failed error
 
 	// PeerVersion is the blindfold version at the other end.
 	PeerVersion string
@@ -171,6 +173,9 @@ func (c *Channel) deriveKeys(shared, clientPub, serverPub []byte, client bool) e
 
 // Send seals one message.
 func (c *Channel) Send(v any) error {
+	if c.failed != nil {
+		return c.failed
+	}
 	plaintext, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -191,19 +196,28 @@ var errFrame = errors.New("sync: a frame failed to authenticate; the session was
 
 var errFrameTooLarge = fmt.Errorf("sync: a frame is larger than %d bytes; the session was ended", maxFrameSize)
 
-// Receive opens the next message into v.
+// Receive opens the next message into v. A frame that will not open ends the
+// session: every later Send and Receive returns the same error.
 func (c *Channel) Receive(v any) error {
+	if c.failed != nil {
+		return c.failed
+	}
 	line, err := c.readLine()
+	if errors.Is(err, errFrameTooLarge) {
+		c.failed = err
+	}
 	if err != nil {
 		return err
 	}
 	frame, err := base64.StdEncoding.DecodeString(strings.TrimSuffix(line, "\n"))
 	if err != nil || len(frame) < c.recv.NonceSize() {
+		c.failed = errFrame
 		return errFrame
 	}
 	nonce, sealed := frame[:c.recv.NonceSize()], frame[c.recv.NonceSize():]
 	plaintext, err := c.recv.Open(nil, nonce, sealed, sequenceAAD(c.recvSeq))
 	if err != nil {
+		c.failed = errFrame
 		return errFrame
 	}
 	c.recvSeq++

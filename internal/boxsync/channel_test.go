@@ -118,6 +118,26 @@ func TestChannelRejectsAlteredFrames(t *testing.T) {
 	}
 }
 
+// A frame that fails to open ends the session: a valid frame after it is
+// refused, and nothing more is sent.
+func TestChannelEndsAfterABadFrame(t *testing.T) {
+	client, server, _ := connect(t, "v1", "v1")
+	good := frames(t, client, message{Text: "after garbage"})[0]
+	deliver(server, "garbage\n", good)
+
+	var got message
+	if err := server.Receive(&got); err == nil {
+		t.Fatal("garbage was accepted")
+	}
+	if err := server.Receive(&got); err == nil {
+		t.Errorf("a frame after a bad one was accepted: %+v", got)
+	}
+	server.w = &bytes.Buffer{} // nothing reads the pipe: a send must not block
+	if err := server.Send(message{Text: "still here"}); err == nil {
+		t.Error("the session sent after a bad frame")
+	}
+}
+
 // Both ends derive the same digest of the same bytes; another session derives
 // a different one, so a digest read off one session says nothing elsewhere.
 func TestChannelDigest(t *testing.T) {
